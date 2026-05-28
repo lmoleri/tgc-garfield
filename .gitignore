@@ -1,0 +1,23 @@
+# Garfield++ vendor source and compiled installation
+vendor/
+local/
+
+# Project build directories
+projects/*/build/
+projects/*/build_*/
+
+# Simulation results and generated gas files
+projects/*/results/
+projects/*/*.gas
+*.gas
+
+# Generated ROOT files (large binary outputs)
+projects/*/*.root
+*.root
+
+# parallel_plate has its own git repo; exclude from this workspace repo
+projects/parallel_plate/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store

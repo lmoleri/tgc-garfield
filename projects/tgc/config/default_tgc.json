@@ -1,0 +1,27 @@
+{
+  "geometry": {
+    "wire_pitch_cm": 0.18,
+    "wire_diameter_um": 50.0,
+    "gap_cm": 0.14,
+    "n_wires": 10,
+    "wire_voltage_V": 1900.0
+  },
+  "source": {
+    "energy_keV": 5.9,
+    "source_distances_mm": [0.2, 0.5, 0.9, 1.2],
+    "x_position_cm": null
+  },
+  "gas": {
+    "temperature_K": 293.15,
+    "pressure_Torr": 760.0,
+    "gas_file": "ar_70_co2_30.gas",
+    "enable_penning": true,
+    "n_magboltz_collisions": 10
+  },
+  "simulation": {
+    "n_events": 1000,
+    "max_avalanche_size": 500000,
+    "time_window_ns": 300.0,
+    "time_step_ns": 0.5
+  }
+}
