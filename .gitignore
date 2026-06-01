@@ -18,6 +18,11 @@ projects/*/*.root
 # parallel_plate has its own git repo; exclude from this workspace repo
 projects/parallel_plate/
 
+# Python bytecode
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
 # macOS metadata
 .DS_Store
 **/.DS_Store
