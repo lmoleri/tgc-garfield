@@ -14,18 +14,18 @@
   "gas": {
     "temperature_K": 293.15,
     "pressure_Torr": 760.0,
-    "gas_file": "ar_70_co2_30_e400_fast.gas",
     "enable_penning": true,
-    "n_magboltz_collisions": 2,
+    "n_magboltz_collisions": 5,
     "max_electron_energy_eV": 2000.0,
     "n_field_points": 10,
-    "e_field_max_vcm": 100000.0,
+    "e_field_max_vcm": 400000.0,
     "w_value_eV": 26.0
   },
   "simulation": {
     "n_events": 10,
     "max_avalanche_size": 10000,
     "time_window_ns": 300.0,
-    "time_step_ns": 0.5
+    "time_step_ns": 0.5,
+    "enable_ion_drift": true
   }
 }

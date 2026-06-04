@@ -6,7 +6,7 @@
 //            y < 0 is the readout pad ("cathode") side.
 // Gas      : Ar:CO2 70:30, 1 atm, 293.15 K.
 // Source   : N = E/W primary electrons placed at a configurable distance from
-//            the wire plane (signed: positive → cathode_top side).
+//            the wire plane (signed: positive → readout pad side, y < 0).
 //            N is computed from the photon energy and the gas W-value.
 // Readout  : (1) all wires as a single "anode" channel,
 //            (2) the bottom cathode plane as a "cathode" channel.
@@ -23,6 +23,7 @@
 #include <TROOT.h>
 #include <TRandom.h>
 #include <TStyle.h>
+#include <TTree.h>
 
 #include <algorithm>
 #include <cmath>
@@ -42,6 +43,7 @@
 
 #include "Garfield/AvalancheMicroscopic.hh"
 #include "Garfield/ComponentAnalyticField.hh"
+#include "Garfield/DriftLineRKF.hh"
 #include "Garfield/FundamentalConstants.hh"
 #include "Garfield/MediumMagboltz.hh"
 #include "Garfield/Sensor.hh"
@@ -53,6 +55,7 @@ namespace {
 
 using Garfield::AvalancheMicroscopic;
 using Garfield::ComponentAnalyticField;
+using Garfield::DriftLineRKF;
 using Garfield::MediumMagboltz;
 using Garfield::Sensor;
 using json = nlohmann::json;
@@ -77,10 +80,9 @@ struct SourceConfig {
 struct GasConfig {
   double temperatureK        = 293.15;
   double pressureTorr        = 760.0;
-  std::string gasFile        = "ar_70_co2_30_e400.gas";
   bool   enablePenning       = true;
   int    nCollisions         = 10;
-  double maxElectronEnergyEV = 400.0;
+  double maxElectronEnergyEV = 2000.0;
   int    nFieldPoints        = 20;         // number of E-field grid points for Magboltz
   double eFieldMaxVcm        = 300000.0;  // upper E-field limit [V/cm] for the gas table
   double wValueEV            = 26.0;      // effective ionisation energy [eV per ion pair]
@@ -91,7 +93,13 @@ struct SimulationConfig {
   std::size_t maxAvalancheSize = 500000;
   double      timeWindowNs     = 300.0;
   double      timeStepNs       = 0.5;
+  bool        enableIonDrift   = true;
+  bool        storeDriftLines  = false; // store intermediate e⁻ drift steps for 3D viz
 };
+
+// ─── 3D-visualisation display limits ─────────────────────────────────────────
+constexpr std::size_t kMaxDispIonPaths = 20;   // ion drift paths saved per event
+constexpr std::size_t kMaxDispCloudPts = 500;  // avalanche-cloud points saved per event
 
 struct Config {
   GeometryConfig   geometry;
@@ -136,6 +144,22 @@ std::string FileSafeNumber(double v) {
   std::replace(s.begin(), s.end(), '.', 'p');
   std::replace(s.begin(), s.end(), '-', 'm');
   return s;
+}
+
+std::string DeriveGasFileName(const GasConfig& g) {
+  auto I = [](double v) {
+    return std::to_string(static_cast<long long>(std::llround(v)));
+  };
+  const int efKv = static_cast<int>(std::llround(g.eFieldMaxVcm / 1000.0));
+  return "ar70_co2_30"
+         "_T"  + I(g.temperatureK)
+       + "_P"  + I(g.pressureTorr)
+       + "_Ee" + I(g.maxElectronEnergyEV)
+       + "_Ef" + std::to_string(efKv) + "k"
+       + "_n"  + std::to_string(g.nFieldPoints)
+       + "_c"  + std::to_string(g.nCollisions)
+       + (g.enablePenning ? "_pen" : "_nopen")
+       + ".gas";
 }
 
 void EnsureDirectory(const fs::path& p) { fs::create_directories(p); }
@@ -211,13 +235,6 @@ bool ReadBool(const json& obj, std::string_view sec, std::string_view key, bool 
   if (!v) return fb;
   if (!v->is_boolean()) ThrowJsonTypeError({sec, key}, "a boolean");
   return v->get<bool>();
-}
-
-std::string ReadString(const json& obj, std::string_view sec, std::string_view key, const std::string& fb) {
-  auto* v = FindMember(obj, key, {sec, key});
-  if (!v) return fb;
-  if (!v->is_string()) ThrowJsonTypeError({sec, key}, "a string");
-  return v->get<std::string>();
 }
 
 std::vector<double> ReadDoubleArray(const json& obj, std::string_view sec, std::string_view key,
@@ -321,7 +338,6 @@ Config LoadConfig(const fs::path& path) {
   if (const auto* g = FindSection(root, "gas")) {
     cfg.gas.temperatureK  = ReadDouble(*g, "gas", "temperature_K",       cfg.gas.temperatureK);
     cfg.gas.pressureTorr  = ReadDouble(*g, "gas", "pressure_Torr",       cfg.gas.pressureTorr);
-    cfg.gas.gasFile       = ReadString(*g, "gas", "gas_file",             cfg.gas.gasFile);
     cfg.gas.enablePenning = ReadBool  (*g, "gas", "enable_penning",       cfg.gas.enablePenning);
     cfg.gas.nCollisions         = ReadInt   (*g, "gas", "n_magboltz_collisions",  cfg.gas.nCollisions);
     cfg.gas.maxElectronEnergyEV = ReadDouble(*g, "gas", "max_electron_energy_eV", cfg.gas.maxElectronEnergyEV);
@@ -335,6 +351,8 @@ Config LoadConfig(const fs::path& path) {
     cfg.simulation.maxAvalancheSize = ReadSizeT (*s, "simulation", "max_avalanche_size", cfg.simulation.maxAvalancheSize);
     cfg.simulation.timeWindowNs     = ReadDouble(*s, "simulation", "time_window_ns",     cfg.simulation.timeWindowNs);
     cfg.simulation.timeStepNs       = ReadDouble(*s, "simulation", "time_step_ns",       cfg.simulation.timeStepNs);
+    cfg.simulation.enableIonDrift   = ReadBool  (*s, "simulation", "enable_ion_drift",   cfg.simulation.enableIonDrift);
+    cfg.simulation.storeDriftLines  = ReadBool  (*s, "simulation", "store_drift_lines",  cfg.simulation.storeDriftLines);
   }
 
   if (cfg.geometry.wirePitchCm <= 0.)  throw std::runtime_error("geometry.wire_pitch_cm must be positive");
@@ -358,16 +376,18 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   gas.SetTemperature(cfg.temperatureK);
   gas.SetPressure(cfg.pressureTorr);
 
-  if (fs::exists(cfg.gasFile)) {
-    std::cout << "  Loading gas table from: " << cfg.gasFile << "\n";
-    gas.LoadGasFile(cfg.gasFile);
+  const std::string gasFile = DeriveGasFileName(cfg);
+
+  if (fs::exists(gasFile)) {
+    std::cout << "  Loading gas table from: " << gasFile << "\n";
+    gas.LoadGasFile(gasFile);
     // LoadGasFile restores the EFINAL ceiling stored in the file.  Override it
     // so the collision-rate table for AvalancheMicroscopic is pre-built to a
     // high enough energy to cover electrons near the wire (~160 kV/cm at 1900 V
     // can push electrons past 400 eV), preventing silent transport aborts.
     gas.SetMaxElectronEnergy(cfg.maxElectronEnergyEV);
   } else {
-    std::cout << "  Gas file not found: " << cfg.gasFile << "\n"
+    std::cout << "  Gas file not found: " << gasFile << "\n"
               << "  Running Magboltz for " << cfg.nFieldPoints
               << " field points up to " << static_cast<int>(cfg.eFieldMaxVcm) << " V/cm"
               << " (first run: ~5 min for smoke grid, ~1-2 h for full grid)...\n";
@@ -379,8 +399,8 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
     // can take hours; reduce e_field_max_vcm / n_field_points for faster smoke runs.
     gas.SetFieldGrid(100., cfg.eFieldMaxVcm, cfg.nFieldPoints, /*logspacing=*/true);
     gas.GenerateGasTable(cfg.nCollisions, /*verbose=*/false);
-    gas.WriteGasFile(cfg.gasFile);
-    std::cout << "  Gas table saved to: " << cfg.gasFile << "\n";
+    gas.WriteGasFile(gasFile);
+    std::cout << "  Gas table saved to: " << gasFile << "\n";
   }
 
   if (cfg.enablePenning) {
@@ -461,7 +481,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   const auto& geom = cfg.geometry;
   const auto& sim  = cfg.simulation;
 
-  const double sourceYCm = sourceDistanceMm * 0.1; // mm → cm
+  const double sourceYCm = -sourceDistanceMm * 0.1; // mm → cm, positive distance → readout side (y < 0)
   // Clamp to strictly inside the gas gap (away from cathode surfaces)
   const double y0 = std::max(-geom.gapCm + 1.e-4,
                               std::min(geom.gapCm - 1.e-4, sourceYCm));
@@ -497,6 +517,39 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     h->SetDirectory(nullptr);
   }
 
+  // ── Per-event signal tree ────────────────────────────────────────────────────
+  TTree signalTree("t_signals", "Per-event signal waveforms");
+  signalTree.SetDirectory(nullptr);
+  std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
+  int   evtId = 0;
+  float evtQa = 0.f, evtQc = 0.f;
+  signalTree.Branch("event",             &evtId, "event/I");
+  signalTree.Branch("anode_charge_fC",   &evtQa, "anode_charge_fC/F");
+  signalTree.Branch("cathode_charge_fC", &evtQc, "cathode_charge_fC/F");
+  signalTree.Branch("anode",   &anodeSig);
+  signalTree.Branch("cathode", &cathodeSig);
+
+  // ── 3D track branches ────────────────────────────────────────────────────────
+  // primary_x/y/z : points along the primary electron drift line (≥ 2 always;
+  //                 many intermediate steps when store_drift_lines=true)
+  // cloud_x/y/z   : start positions of secondary electron tracks (avalanche cloud)
+  // ion_x/y/z     : ion drift paths for up to kMaxDispIonPaths ions, flattened
+  // ion_npts       : number of drift-line points per stored ion path
+  std::vector<float> primaryX, primaryY, primaryZ;
+  std::vector<float> cloudX,   cloudY,   cloudZ;
+  std::vector<float> ionX,     ionY,     ionZ;
+  std::vector<int>   ionNpts;
+  signalTree.Branch("primary_x", &primaryX);
+  signalTree.Branch("primary_y", &primaryY);
+  signalTree.Branch("primary_z", &primaryZ);
+  signalTree.Branch("cloud_x",   &cloudX);
+  signalTree.Branch("cloud_y",   &cloudY);
+  signalTree.Branch("cloud_z",   &cloudZ);
+  signalTree.Branch("ion_x",     &ionX);
+  signalTree.Branch("ion_y",     &ionY);
+  signalTree.Branch("ion_z",     &ionZ);
+  signalTree.Branch("ion_npts",  &ionNpts);
+
   // ── Transport objects ────────────────────────────────────────────────────────
   // Average primary electrons: N = E_photon / W-value (e.g. 5900 eV / 26 eV ≈ 227)
   const int nPrimary = std::max(1,
@@ -504,6 +557,15 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
   AvalancheMicroscopic aval(&sensor);
   if (sim.maxAvalancheSize > 0) aval.EnableAvalancheSizeLimit(sim.maxAvalancheSize);
+  // Enables storage of intermediate collision steps along each drift line.
+  // Without this, GetNumberOfElectronDriftLinePoints returns 2 (start + end only).
+  if (sim.storeDriftLines) aval.EnableDriftLines(true);
+
+  // Ion drift: DriftLineRKF transports each positive ion from its creation
+  // position and adds the Ramo-theorem induced current to the sensor.
+  // Constructed only when ion transport is enabled to avoid needless overhead.
+  std::optional<DriftLineRKF> ionDrift;
+  if (sim.enableIonDrift) ionDrift.emplace(&sensor);
 
   // ── Accumulators for summary statistics ──────────────────────────────────────
   std::vector<double> anodeCharges, cathodeCharges, chargeRatios;
@@ -541,14 +603,88 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     hAvalSize.Fill(static_cast<double>(totalAvalElectrons));
     avalancheSizes.push_back(static_cast<double>(totalAvalElectrons));
 
+    // ── 3D track data ────────────────────────────────────────────────────────
+    // nEp is hoisted here so both the cloud loop and the ion-drift loop reuse it.
+    const std::size_t nEp = aval.GetNumberOfElectronEndpoints();
+
+    // Primary electron drift line (track 0).
+    // GetNumberOfElectronDriftLinePoints(0) returns ≥ 2 (start + end) always;
+    // with storeDriftLines=true it returns all intermediate collision steps.
+    primaryX.clear(); primaryY.clear(); primaryZ.clear();
+    {
+      const std::size_t nPts = aval.GetNumberOfElectronDriftLinePoints(0);
+      primaryX.reserve(nPts); primaryY.reserve(nPts); primaryZ.reserve(nPts);
+      for (std::size_t ip = 0; ip < nPts; ++ip) {
+        double px, py, pz, pt;
+        aval.GetElectronDriftLinePoint(px, py, pz, pt, ip, /*track=*/0);
+        primaryX.push_back(static_cast<float>(px));
+        primaryY.push_back(static_cast<float>(py));
+        primaryZ.push_back(static_cast<float>(pz));
+      }
+    }
+
+    // Avalanche cloud: start positions of secondary electron tracks (tracks 1…nEp-1).
+    // These cluster near the wire and visualise the avalanche extent.
+    cloudX.clear(); cloudY.clear(); cloudZ.clear();
+    {
+      const std::size_t nSec   = nEp > 0 ? nEp - 1 : 0;
+      const std::size_t stride = (nSec > kMaxDispCloudPts && kMaxDispCloudPts > 0)
+                                  ? nSec / kMaxDispCloudPts : 1;
+      cloudX.reserve(std::min(nSec, kMaxDispCloudPts));
+      for (std::size_t i = 1; i < nEp; i += stride) {
+        double x0c, y0c, z0c, t0c, e0c, x1c, y1c, z1c, t1c, e1c; int stc;
+        aval.GetElectronEndpoint(i, x0c, y0c, z0c, t0c, e0c,
+                                    x1c, y1c, z1c, t1c, e1c, stc);
+        cloudX.push_back(static_cast<float>(x0c));
+        cloudY.push_back(static_cast<float>(y0c));
+        cloudZ.push_back(static_cast<float>(z0c));
+      }
+    }
+
+    // Drift every positive ion from the position where it was created.
+    // AvalancheMicroscopic records each electron track; the start point of
+    // track 0 is the primary photoionisation ion, and the start points of
+    // tracks 1…n are the positions of the avalanche ions from ionising
+    // collisions near the wire.  DriftLineRKF::DriftIon() transports each ion
+    // to the cathode and adds its Ramo-theorem induced current to the sensor;
+    // contributions outside the sensor time window are clipped automatically.
+    // For the first kMaxDispIonPaths ions the full drift-line path is also
+    // extracted immediately after each DriftIon call (before the next call
+    // overwrites DriftLineRKF's internal state).
+    ionX.clear(); ionY.clear(); ionZ.clear(); ionNpts.clear();
+    if (sim.enableIonDrift) {
+      for (std::size_t i = 0; i < nEp; ++i) {
+        double xi0, yi0, zi0, ti0, ei0;
+        double xi1, yi1, zi1, ti1, ei1;
+        int st;
+        aval.GetElectronEndpoint(i, xi0, yi0, zi0, ti0, ei0,
+                                    xi1, yi1, zi1, ti1, ei1, st);
+        ionDrift->DriftIon(xi0, yi0, zi0, ti0);
+
+        if (i < kMaxDispIonPaths) {
+          const std::size_t nPts = ionDrift->GetNumberOfDriftLinePoints();
+          ionNpts.push_back(static_cast<int>(nPts));
+          for (std::size_t ip = 0; ip < nPts; ++ip) {
+            double ix, iy, iz, it;
+            ionDrift->GetDriftLinePoint(ip, ix, iy, iz, it);
+            ionX.push_back(static_cast<float>(ix));
+            ionY.push_back(static_cast<float>(iy));
+            ionZ.push_back(static_cast<float>(iz));
+          }
+        }
+      }
+    }
+
     // Integrate the binned induced-current signal to obtain charge.
     // GetSignal returns the induced current in fC/ns; multiplying by the bin
     // width (ns) and summing gives charge in fC.  Scale by nPrimary.
     //
-    // Sign convention (Shockley-Ramo, confirmed by inspection of ROOT output):
-    //   anode   : dominated by electron collection → net integral is NEGATIVE
+    // Sign convention (Shockley-Ramo):
+    //   anode   : electrons moving toward wire + ions moving away from wire
+    //             → both give net integral NEGATIVE in Garfield++
     //             → negate to obtain the conventionally positive collected charge
-    //   cathode : dominated by ion drift toward pad → net integral is POSITIVE
+    //   cathode : dominated by ions drifting toward the readout pad
+    //             → net integral is POSITIVE
     //
     // NOTE: Sensor::GetInducedCharge() uses a separate per-electrode "charge"
     // accumulator that AvalancheMicroscopic does not populate (it only calls
@@ -563,10 +699,17 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       const double t = (static_cast<double>(k) + 0.5) * sim.timeStepNs;
       pAnodeSignal.Fill(t,   sigA * nPrimary);
       pCathodeSignal.Fill(t, sigC * nPrimary);
+      anodeSig[k]   = static_cast<float>(sigA * nPrimary);
+      cathodeSig[k] = static_cast<float>(sigC * nPrimary);
     }
 
     const double qAnode   = -rawAnode   * sim.timeStepNs * nPrimary; // [fC]
     const double qCathode =  rawCathode * sim.timeStepNs * nPrimary; // [fC]
+
+    evtId = static_cast<int>(ev);
+    evtQa = static_cast<float>(qAnode);
+    evtQc = static_cast<float>(qCathode);
+    signalTree.Fill();
 
     hAnodeQ.Fill(qAnode);
     hCathodeQ.Fill(qCathode);
@@ -596,6 +739,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     hAvalSize.Write("h_avalanche_size");
     pAnodeSignal.Write("p_anode_signal");
     pCathodeSignal.Write("p_cathode_signal");
+    signalTree.Write("t_signals");
   }
 
   // ── Build summary ─────────────────────────────────────────────────────────────
@@ -721,10 +865,9 @@ json ConfigToJson(const Config& cfg) {
     }},
     {"source", jSrc},
     {"gas", {
-      {"temperature_K",         cfg.gas.temperatureK},
-      {"pressure_Torr",         cfg.gas.pressureTorr},
-      {"gas_file",              cfg.gas.gasFile},
-      {"enable_penning",        cfg.gas.enablePenning},
+      {"temperature_K",          cfg.gas.temperatureK},
+      {"pressure_Torr",          cfg.gas.pressureTorr},
+      {"enable_penning",         cfg.gas.enablePenning},
       {"n_magboltz_collisions",  cfg.gas.nCollisions},
       {"max_electron_energy_eV", cfg.gas.maxElectronEnergyEV},
       {"n_field_points",         cfg.gas.nFieldPoints},
@@ -732,10 +875,12 @@ json ConfigToJson(const Config& cfg) {
       {"w_value_eV",             cfg.gas.wValueEV}
     }},
     {"simulation", {
-      {"n_events",          cfg.simulation.nEvents},
-      {"max_avalanche_size",cfg.simulation.maxAvalancheSize},
-      {"time_window_ns",    cfg.simulation.timeWindowNs},
-      {"time_step_ns",      cfg.simulation.timeStepNs}
+      {"n_events",           cfg.simulation.nEvents},
+      {"max_avalanche_size", cfg.simulation.maxAvalancheSize},
+      {"time_window_ns",     cfg.simulation.timeWindowNs},
+      {"time_step_ns",       cfg.simulation.timeStepNs},
+      {"enable_ion_drift",   cfg.simulation.enableIonDrift},
+      {"store_drift_lines",  cfg.simulation.storeDriftLines}
     }}
   };
 }

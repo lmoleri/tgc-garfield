@@ -19,11 +19,12 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -36,6 +37,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -54,6 +56,22 @@ SCRIPT_DIR       = Path(__file__).parent.resolve()              # …/projects/t
 TGC_DIR          = (SCRIPT_DIR / "..").resolve()                # …/projects/tgc/
 BINARY           = TGC_DIR / "build" / "tgc_sim"
 GARFIELD_INSTALL = (TGC_DIR / "../../local/garfield").resolve() # …/local/garfield/
+
+
+# ---------------------------------------------------------------------------
+# Gas filename derivation
+# ---------------------------------------------------------------------------
+
+def derive_gas_filename(gas: dict) -> str:
+    """Return a deterministic .gas filename from gas config parameters."""
+    T   = round(gas.get("temperature_K", 293.15))
+    P   = round(gas.get("pressure_Torr", 760.0))
+    Ee  = round(gas.get("max_electron_energy_eV", 2000.0))
+    Ef  = round(gas.get("e_field_max_vcm", 300000.0) / 1000)
+    n   = gas.get("n_field_points", 20)
+    c   = gas.get("n_magboltz_collisions", 10)
+    pen = "pen" if gas.get("enable_penning", True) else "nopen"
+    return f"ar70_co2_30_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen}.gas"
 
 
 # ---------------------------------------------------------------------------
@@ -196,17 +214,6 @@ class ConfigPanel(QScrollArea):
         self.temperature = self._dspin(200.0, 500.0, 1.0, 2, 293.15)
         self.pressure    = self._dspin(100.0, 3000.0, 10.0, 1, 760.0)
 
-        gas_row  = QWidget()
-        gas_h    = QHBoxLayout(gas_row)
-        gas_h.setContentsMargins(0, 0, 0, 0)
-        self.gas_file = QLineEdit("ar_70_co2_30_e400.gas")
-        self.gas_file.setToolTip("Path to the Magboltz gas table file")
-        btn_gas = QPushButton("…")
-        btn_gas.setFixedWidth(28)
-        btn_gas.clicked.connect(self._browse_gas_file)
-        gas_h.addWidget(self.gas_file)
-        gas_h.addWidget(btn_gas)
-
         self.penning = QCheckBox()
         self.penning.setChecked(True)
         self.ncoll = self._spin(1, 100, 10)
@@ -214,13 +221,30 @@ class ConfigPanel(QScrollArea):
         self.w_value = self._dspin(10.0, 100.0, 0.5, 1, 26.0)
         self.w_value.setToolTip("Effective ionisation energy W [eV per ion pair] for primary electron count")
 
+        # Hidden state for gas parameters not shown in the UI
+        self._hidden_gas = {
+            "max_electron_energy_eV": 2000.0,
+            "n_field_points": 20,
+            "e_field_max_vcm": 300000.0,
+        }
+
+        self.gas_file_label = QLabel()
+        self.gas_file_label.setWordWrap(True)
+        self.gas_file_label.setStyleSheet("font-size: 10px;")
+
         gas_form.addRow("Temperature [K]",     self.temperature)
         gas_form.addRow("Pressure [Torr]",     self.pressure)
-        gas_form.addRow("Gas file",            gas_row)
         gas_form.addRow("Penning transfer",    self.penning)
         gas_form.addRow("Magboltz ncoll",      self.ncoll)
         gas_form.addRow("W-value [eV]",        self.w_value)
+        gas_form.addRow("Gas file (auto)",     self.gas_file_label)
         root_layout.addWidget(gas_box)
+
+        # Update gas file label whenever a relevant parameter changes
+        self.temperature.valueChanged.connect(self._update_gas_file_label)
+        self.pressure.valueChanged.connect(self._update_gas_file_label)
+        self.penning.toggled.connect(self._update_gas_file_label)
+        self.ncoll.valueChanged.connect(self._update_gas_file_label)
 
         # ── Simulation ────────────────────────────────────────────────────
         sim_box  = QGroupBox("Simulation")
@@ -230,11 +254,26 @@ class ConfigPanel(QScrollArea):
         self.max_aval    = self._spin(1000, 10000000, 500000)
         self.time_window = self._dspin(10.0, 2000.0, 10.0, 1, 300.0)
         self.time_step   = self._dspin(0.1, 10.0, 0.1, 2, 0.5)
+        self.enable_ion_drift = QCheckBox()
+        self.enable_ion_drift.setChecked(True)
+        self.enable_ion_drift.setToolTip(
+            "Drift positive ions after each avalanche (DriftLineRKF).\n"
+            "Disabling skips ion signal computation and greatly speeds up runs."
+        )
+        self.store_drift_lines = QCheckBox()
+        self.store_drift_lines.setChecked(False)
+        self.store_drift_lines.setToolTip(
+            "Store intermediate drift-line steps for the 3D track view.\n"
+            "Off: primary electron shown as straight start→end line.\n"
+            "On: full curved trajectory, but adds ~15 % CPU time per event."
+        )
 
         sim_form.addRow("Events",             self.n_events)
         sim_form.addRow("Max avalanche size", self.max_aval)
         sim_form.addRow("Time window [ns]",   self.time_window)
         sim_form.addRow("Time step [ns]",     self.time_step)
+        sim_form.addRow("Ion transport",      self.enable_ion_drift)
+        sim_form.addRow("Store drift lines",  self.store_drift_lines)
         root_layout.addWidget(sim_box)
 
         # ── Output ────────────────────────────────────────────────────────
@@ -258,6 +297,8 @@ class ConfigPanel(QScrollArea):
         root_layout.addStretch()
         self.setWidget(container)
 
+        self._update_gas_file_label()
+
     # ── widget factories ─────────────────────────────────────────────────
 
     @staticmethod
@@ -276,15 +317,22 @@ class ConfigPanel(QScrollArea):
         w.setValue(val)
         return w
 
-    # ── file dialogs ─────────────────────────────────────────────────────
+    # ── gas file label ───────────────────────────────────────────────────
 
-    def _browse_gas_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select gas file", "",
-            "Gas files (*.gas);;All files (*)"
-        )
-        if path:
-            self.gas_file.setText(path)
+    def _update_gas_file_label(self):
+        gas = {
+            "temperature_K":         self.temperature.value(),
+            "pressure_Torr":         self.pressure.value(),
+            "enable_penning":        self.penning.isChecked(),
+            "n_magboltz_collisions": self.ncoll.value(),
+            **self._hidden_gas,
+        }
+        name = derive_gas_filename(gas)
+        exists = (TGC_DIR / name).exists()
+        status = "✓ exists" if exists else "will be generated"
+        self.gas_file_label.setText(f"{name}\n[{status}]")
+
+    # ── file dialogs ─────────────────────────────────────────────────────
 
     def _browse_out_dir(self):
         path = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -317,18 +365,22 @@ class ConfigPanel(QScrollArea):
                 "x_position_cm":       x_pos,
             },
             "gas": {
-                "temperature_K":         self.temperature.value(),
-                "pressure_Torr":         self.pressure.value(),
-                "gas_file":              self.gas_file.text(),
-                "enable_penning":        self.penning.isChecked(),
-                "n_magboltz_collisions": self.ncoll.value(),
-                "w_value_eV":            self.w_value.value(),
+                "temperature_K":          self.temperature.value(),
+                "pressure_Torr":          self.pressure.value(),
+                "enable_penning":         self.penning.isChecked(),
+                "n_magboltz_collisions":  self.ncoll.value(),
+                "w_value_eV":             self.w_value.value(),
+                "max_electron_energy_eV": self._hidden_gas["max_electron_energy_eV"],
+                "n_field_points":         self._hidden_gas["n_field_points"],
+                "e_field_max_vcm":        self._hidden_gas["e_field_max_vcm"],
             },
             "simulation": {
                 "n_events":           self.n_events.value(),
                 "max_avalanche_size": self.max_aval.value(),
                 "time_window_ns":     self.time_window.value(),
                 "time_step_ns":       self.time_step.value(),
+                "enable_ion_drift":   self.enable_ion_drift.isChecked(),
+                "store_drift_lines":  self.store_drift_lines.isChecked(),
             },
         }
 
@@ -355,16 +407,21 @@ class ConfigPanel(QScrollArea):
         gas = d.get("gas", {})
         self.temperature.setValue(gas.get("temperature_K", 293.15))
         self.pressure.setValue(   gas.get("pressure_Torr", 760.0))
-        self.gas_file.setText(    gas.get("gas_file", "ar_70_co2_30_e400.gas"))
         self.penning.setChecked(  gas.get("enable_penning", True))
         self.ncoll.setValue(      gas.get("n_magboltz_collisions", 10))
         self.w_value.setValue(    gas.get("w_value_eV", 26.0))
+        self._hidden_gas["max_electron_energy_eV"] = gas.get("max_electron_energy_eV", 2000.0)
+        self._hidden_gas["n_field_points"]         = gas.get("n_field_points", 20)
+        self._hidden_gas["e_field_max_vcm"]        = gas.get("e_field_max_vcm", 300000.0)
+        self._update_gas_file_label()
 
         sim = d.get("simulation", {})
-        self.n_events.setValue(   sim.get("n_events", 1000))
-        self.max_aval.setValue(   sim.get("max_avalanche_size", 500000))
-        self.time_window.setValue(sim.get("time_window_ns", 300.0))
-        self.time_step.setValue(  sim.get("time_step_ns", 0.5))
+        self.n_events.setValue(        sim.get("n_events", 1000))
+        self.max_aval.setValue(        sim.get("max_avalanche_size", 500000))
+        self.time_window.setValue(     sim.get("time_window_ns", 300.0))
+        self.time_step.setValue(       sim.get("time_step_ns", 0.5))
+        self.enable_ion_drift.setChecked(sim.get("enable_ion_drift", True))
+        self.store_drift_lines.setChecked(sim.get("store_drift_lines", False))
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +438,15 @@ class MplCanvas(FigureCanvasQTAgg):
             self.figure.add_subplot(nrows, ncols, i + 1)
             for i in range(nrows * ncols)
         ]
+        super().__init__(self.figure)
+
+
+class Mpl3DCanvas(FigureCanvasQTAgg):
+    """A single matplotlib 3D axes embedded in a Qt widget."""
+
+    def __init__(self, figsize: tuple = (8, 5), parent=None):
+        self.figure = Figure(figsize=figsize)
+        self.ax = self.figure.add_subplot(111, projection="3d")
         super().__init__(self.figure)
 
 
@@ -412,9 +478,105 @@ class ResultsPanel(QTabWidget):
         self.plots_canvas = MplCanvas(nrows=2, ncols=2, figsize=(7, 5))
         self.addTab(self.plots_canvas, "Plots")
 
-        # ── Waveforms tab: 1×2 matplotlib figure ─────────────────────────
-        self.wave_canvas = MplCanvas(nrows=1, ncols=2, figsize=(7, 3))
-        self.addTab(self.wave_canvas, "Waveforms")
+        # ── Waveforms tab: ROOT TCanvas browser ──────────────────────────
+        self._waveform_data: dict = {}
+        self._root_canvas  = None    # ROOT TCanvas (kept alive between events)
+        self._root_objects: list = []  # TGraph/TLegend objects (prevent Python GC)
+        self._track_data:   dict = {}  # label → dict of numpy object arrays
+        self._track_geom:   dict | None = None
+
+        wave_widget = QWidget()
+        wave_layout = QVBoxLayout(wave_widget)
+        wave_layout.setContentsMargins(8, 6, 8, 6)
+        wave_layout.setSpacing(6)
+
+        # — selector row —
+        sel_row = QWidget()
+        sel_h   = QHBoxLayout(sel_row)
+        sel_h.setContentsMargins(0, 0, 0, 0)
+        sel_h.addWidget(QLabel("Distance:"))
+        self.wave_dist_combo = QComboBox()
+        sel_h.addWidget(self.wave_dist_combo)
+        sel_h.addSpacing(16)
+        sel_h.addWidget(QLabel("Event:"))
+        self.wave_event_slider = QSlider(Qt.Horizontal)
+        self.wave_event_slider.setMinimum(0)
+        self.wave_event_slider.setMaximum(0)
+        self.wave_event_slider.setSingleStep(1)
+        sel_h.addWidget(self.wave_event_slider)
+        self.wave_event_label = QLabel("— / —")
+        self.wave_event_label.setMinimumWidth(55)
+        sel_h.addWidget(self.wave_event_label)
+        wave_layout.addWidget(sel_row)
+
+        # — per-event info —
+        info_box  = QGroupBox("Current event")
+        info_form = QFormLayout(info_box)
+        info_form.setVerticalSpacing(2)
+        self.wave_qa_lbl    = QLabel("—")
+        self.wave_qc_lbl    = QLabel("—")
+        self.wave_ratio_lbl = QLabel("—")
+        info_form.addRow("Q anode [fC]:",   self.wave_qa_lbl)
+        info_form.addRow("Q cathode [fC]:", self.wave_qc_lbl)
+        info_form.addRow("Ratio:",          self.wave_ratio_lbl)
+        wave_layout.addWidget(info_box)
+
+        # — hint —
+        hint = QLabel(
+            "ROOT canvas opens automatically when results are loaded.\n"
+            "Right-click inside the ROOT window to zoom, change axes, or save."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: grey; font-size: 11px;")
+        wave_layout.addWidget(hint)
+        wave_layout.addStretch()
+
+        self.wave_dist_combo.currentIndexChanged.connect(self._on_wave_dist_changed)
+        self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
+
+        self.addTab(wave_widget, "Waveforms")
+
+        # ── 3D Tracks tab ─────────────────────────────────────────────────────
+        tracks_widget = QWidget()
+        tracks_layout = QVBoxLayout(tracks_widget)
+        tracks_layout.setContentsMargins(8, 6, 8, 6)
+        tracks_layout.setSpacing(6)
+
+        # — selector row —
+        trk_sel_row = QWidget()
+        trk_sel_h   = QHBoxLayout(trk_sel_row)
+        trk_sel_h.setContentsMargins(0, 0, 0, 0)
+        trk_sel_h.addWidget(QLabel("Distance:"))
+        self.trk_dist_combo = QComboBox()
+        trk_sel_h.addWidget(self.trk_dist_combo)
+        trk_sel_h.addSpacing(16)
+        trk_sel_h.addWidget(QLabel("Event:"))
+        self.trk_event_slider = QSlider(Qt.Horizontal)
+        self.trk_event_slider.setMinimum(0)
+        self.trk_event_slider.setMaximum(0)
+        self.trk_event_slider.setSingleStep(1)
+        trk_sel_h.addWidget(self.trk_event_slider)
+        self.trk_event_label = QLabel("— / —")
+        self.trk_event_label.setMinimumWidth(55)
+        trk_sel_h.addWidget(self.trk_event_label)
+        rel_hint = QLabel("(release slider to update)")
+        rel_hint.setStyleSheet("color: grey; font-size: 10px;")
+        trk_sel_h.addWidget(rel_hint)
+        trk_sel_h.addStretch()
+        tracks_layout.addWidget(trk_sel_row)
+
+        self.tracks_canvas = Mpl3DCanvas(figsize=(8, 5))
+        tracks_layout.addWidget(self.tracks_canvas, stretch=1)
+
+        self.trk_dist_combo.currentIndexChanged.connect(self._on_trk_dist_changed)
+        self.trk_event_slider.sliderReleased.connect(self._update_track_plot)
+
+        self.addTab(tracks_widget, "3D Tracks")
+
+        # — timer to keep ROOT canvas responsive —
+        self._root_timer = QTimer(self)
+        self._root_timer.setInterval(100)
+        self._root_timer.timeout.connect(self._process_root_events)
 
     # ── Log ───────────────────────────────────────────────────────────────
 
@@ -492,9 +654,18 @@ class ResultsPanel(QTabWidget):
 
     # ── Waveforms ─────────────────────────────────────────────────────────
 
-    def draw_waveforms(self, root_path: str):
+    def _process_root_events(self):
+        """Keep the ROOT TCanvas window responsive while Qt runs."""
         try:
-            import uproot  # noqa: PLC0415 — optional import
+            import ROOT  # noqa: PLC0415
+            ROOT.gSystem.ProcessEvents()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def load_waveform_data(self, root_path: str):
+        """Load per-event TTree waveforms (and mean TProfiles) from the ROOT file."""
+        try:
+            import uproot  # noqa: PLC0415
         except ImportError:
             self.append_log("[GUI] uproot not available — waveform tab will be empty")
             return
@@ -503,51 +674,316 @@ class ResultsPanel(QTabWidget):
             self.append_log(f"[GUI] ROOT file not found: {root_path}")
             return
 
-        ax_a, ax_c = self.wave_canvas.axes
-        ax_a.cla()
-        ax_c.cla()
+        self._waveform_data.clear()
+        self.wave_dist_combo.blockSignals(True)
+        self.wave_dist_combo.clear()
 
         try:
             with uproot.open(root_path) as f:
-                # Collect unique top-level dist_* directory names
-                dist_keys = []
-                seen: set[str] = set()
-                for raw_key in f.keys(cycle=False):
-                    top = raw_key.split("/")[0]
-                    if top.startswith("dist_") and top not in seen:
-                        dist_keys.append(top)
-                        seen.add(top)
-
-                for key in sorted(dist_keys):
-                    # Build a human-readable label from "dist_0p7mm" → "0.7 mm"
+                dist_keys = sorted({
+                    k.split("/")[0] for k in f.keys(cycle=False)
+                    if k.split("/")[0].startswith("dist_")
+                })
+                for key in dist_keys:
                     label = key.removeprefix("dist_").replace("p", ".").replace("mm", " mm")
-
                     try:
-                        pa = f[f"{key}/p_anode_signal"]
-                        pc = f[f"{key}/p_cathode_signal"]
-                        times   = pa.axis(0).centers()
-                        anode   = pa.values()
-                        cathode = pc.values()
-                    except (KeyError, AttributeError, ValueError) as exc:
-                        self.append_log(f"[GUI] Could not read waveforms for {key}: {exc}")
-                        continue
+                        pa     = f[f"{key}/p_anode_signal"]
+                        pc     = f[f"{key}/p_cathode_signal"]
+                        times  = pa.axis(0).centers()
+                        mean_a = pa.values()
+                        mean_c = pc.values()
 
-                    ax_a.plot(times, anode,   lw=1.5, label=label)
-                    ax_c.plot(times, cathode, lw=1.5, label=label)
+                        # std::vector<float> branches → object array of 1D arrays;
+                        # np.stack() converts to a proper (n_evt, nBins) 2D array.
+                        tree    = f[f"{key}/t_signals"]
+                        anode   = np.stack(tree["anode"].array(library="np"))
+                        cathode = np.stack(tree["cathode"].array(library="np"))
 
+                        self._waveform_data[label] = {
+                            "times":   times,
+                            "anode":   anode,
+                            "cathode": cathode,
+                            "mean_a":  mean_a,
+                            "mean_c":  mean_c,
+                        }
+                        self.wave_dist_combo.addItem(label)
+                    except Exception as exc:  # noqa: BLE001
+                        self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
         except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[GUI] Could not read ROOT file: {exc}")
+            self.append_log(f"[GUI] Could not open ROOT file: {exc}")
+
+        self.wave_dist_combo.blockSignals(False)
+        if self.wave_dist_combo.count():
+            self._on_wave_dist_changed(0)
+            self._root_timer.start()
+
+    def _on_wave_dist_changed(self, index: int):
+        label = self.wave_dist_combo.currentText()
+        data  = self._waveform_data.get(label)
+        if data is None:
+            return
+        n = len(data["anode"])
+        self.wave_event_slider.blockSignals(True)
+        self.wave_event_slider.setMaximum(max(0, n - 1))
+        self.wave_event_slider.setValue(0)
+        self.wave_event_slider.blockSignals(False)
+        self.wave_event_label.setText(f"1 / {n}")
+        self._update_waveform_plot()
+
+    def _update_waveform_plot(self):
+        """Draw the selected event in a ROOT TCanvas (anode top, cathode bottom)."""
+        label = self.wave_dist_combo.currentText()
+        data  = self._waveform_data.get(label)
+        if data is None:
             return
 
-        for ax, title in [(ax_a, "Mean anode signal"), (ax_c, "Mean cathode signal")]:
-            ax.set_xlabel("Time [ns]")
-            ax.set_ylabel("Current [fC/ns]")
-            ax.set_title(title)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
+        evt_idx = self.wave_event_slider.value()
+        n       = len(data["anode"])
+        self.wave_event_label.setText(f"{evt_idx + 1} / {n}")
 
-        self.wave_canvas.figure.tight_layout()
-        self.wave_canvas.draw()
+        times   = data["times"].astype("f8")
+        anode   = data["anode"][evt_idx].astype("f8")
+        cathode = data["cathode"][evt_idx].astype("f8")
+        mean_a  = data["mean_a"].astype("f8")
+        mean_c  = data["mean_c"].astype("f8")
+        nbins   = len(times)
+        dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
+
+        qa    = float(-np.sum(anode)   * dt)
+        qc    = float( np.sum(cathode) * dt)
+        ratio = qc / qa if qa != 0 else float("nan")
+
+        self.wave_qa_lbl.setText(f"{qa:.4g}")
+        self.wave_qc_lbl.setText(f"{qc:.4g}")
+        self.wave_ratio_lbl.setText(f"{ratio:.4g}")
+
+        try:
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
+
+            if self._root_canvas is None:
+                self._root_canvas = ROOT.TCanvas(
+                    "tgc_waveforms", "TGC Waveforms", 950, 700
+                )
+                self._root_canvas.SetWindowSize(950, 700)
+
+            self._root_canvas.Clear()
+            self._root_canvas.Divide(1, 2)
+            self._root_objects.clear()   # release previous objects
+
+            def _draw_pad(pad_idx: int, y_evt: np.ndarray, y_mean: np.ndarray,
+                          signal_name: str, line_color: int):
+                self._root_canvas.cd(pad_idx)
+                ROOT.gPad.SetGrid()
+                ga = ROOT.TGraph(nbins, times, y_evt)
+                ga.SetTitle(
+                    f"{signal_name} - {label}, event {evt_idx + 1};"
+                    f"Time [ns];i [fC/ns]"
+                )
+                ga.SetLineColor(line_color)
+                ga.SetLineWidth(2)
+                gm = ROOT.TGraph(nbins, times, y_mean)
+                gm.SetLineColor(ROOT.kGray + 1)
+                gm.SetLineWidth(1)
+                gm.SetLineStyle(2)    # dashed mean
+                ga.Draw("AL")
+                gm.Draw("L same")
+                leg = ROOT.TLegend(0.65, 0.75, 0.88, 0.88)
+                leg.AddEntry(ga, "this event", "L")
+                leg.AddEntry(gm, "mean",       "L")
+                leg.SetBorderSize(0)
+                leg.Draw()
+                self._root_objects.extend([ga, gm, leg])
+
+            _draw_pad(1, anode,   mean_a, "Anode",   ROOT.kBlue + 1)
+            _draw_pad(2, cathode, mean_c, "Cathode", ROOT.kRed  + 1)
+
+            self._root_canvas.Update()
+
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT canvas error: {exc}")
+
+    # ── 3D Tracks ──────────────────────────────────────────────────────────────
+
+    def load_track_data(self, root_path: str, run_dir: str):
+        """Load per-event track branches and geometry from the ROOT file."""
+        try:
+            import uproot  # noqa: PLC0415
+        except ImportError:
+            self.append_log("[GUI] uproot not available — 3D Tracks tab disabled")
+            return
+
+        self._track_data.clear()
+        self._track_geom = None
+        self.trk_dist_combo.blockSignals(True)
+        self.trk_dist_combo.clear()
+
+        # Geometry comes from run_config.json written by the binary
+        cfg_path = Path(run_dir) / "run_config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path) as f:
+                    rc = json.load(f)
+                g = rc.get("geometry", {})
+                self._track_geom = {
+                    "wire_pitch_cm": g.get("wire_pitch_cm", 0.18),
+                    "n_wires":       int(g.get("n_wires", 10)),
+                    "gap_cm":        g.get("gap_cm", 0.14),
+                }
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[GUI] run_config.json read error: {exc}")
+
+        if not Path(root_path).exists():
+            self.trk_dist_combo.blockSignals(False)
+            return
+
+        try:
+            with uproot.open(root_path) as f:
+                dist_keys = sorted({
+                    k.split("/")[0] for k in f.keys(cycle=False)
+                    if k.split("/")[0].startswith("dist_")
+                })
+                for key in dist_keys:
+                    label = key.removeprefix("dist_").replace("p", ".").replace("mm", " mm")
+                    try:
+                        tree = f[f"{key}/t_signals"]
+                        if "primary_x" not in tree.keys():
+                            continue   # pre-feature ROOT file — skip silently
+                        self._track_data[label] = {
+                            "primary_x": tree["primary_x"].array(library="np"),
+                            "primary_y": tree["primary_y"].array(library="np"),
+                            "primary_z": tree["primary_z"].array(library="np"),
+                            "cloud_x":   tree["cloud_x"].array(library="np"),
+                            "cloud_y":   tree["cloud_y"].array(library="np"),
+                            "cloud_z":   tree["cloud_z"].array(library="np"),
+                            "ion_x":     tree["ion_x"].array(library="np"),
+                            "ion_y":     tree["ion_y"].array(library="np"),
+                            "ion_z":     tree["ion_z"].array(library="np"),
+                            "ion_npts":  tree["ion_npts"].array(library="np"),
+                        }
+                        self.trk_dist_combo.addItem(label)
+                    except Exception as exc:  # noqa: BLE001
+                        self.append_log(f"[GUI] Track load error for {key}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] Could not open ROOT file for tracks: {exc}")
+
+        self.trk_dist_combo.blockSignals(False)
+        if self.trk_dist_combo.count():
+            self._on_trk_dist_changed(0)
+
+    def _on_trk_dist_changed(self, index: int):
+        label = self.trk_dist_combo.currentText()
+        data  = self._track_data.get(label)
+        if data is None:
+            return
+        n = len(data["primary_x"])
+        self.trk_event_slider.blockSignals(True)
+        self.trk_event_slider.setMaximum(max(0, n - 1))
+        self.trk_event_slider.setValue(0)
+        self.trk_event_slider.blockSignals(False)
+        self.trk_event_label.setText(f"1 / {n}")
+        self._update_track_plot()
+
+    def _update_track_plot(self):
+        """Render detector geometry and per-event tracks in the 3D canvas."""
+        label = self.trk_dist_combo.currentText()
+        data  = self._track_data.get(label)
+        if data is None:
+            return
+
+        ev = self.trk_event_slider.value()
+        n  = len(data["primary_x"])
+        self.trk_event_label.setText(f"{ev + 1} / {n}")
+
+        ax = self.tracks_canvas.ax
+        ax.cla()
+
+        # ── Geometry ──────────────────────────────────────────────────────────
+        geom    = self._track_geom or {}
+        pitch   = geom.get("wire_pitch_cm", 0.18)
+        n_wires = int(geom.get("n_wires", 10))
+        gap     = geom.get("gap_cm", 0.14)
+        z_half  = 0.5   # sensor z extent [cm]
+        x_half  = (n_wires - 1) / 2.0 * pitch + pitch
+
+        # Cathode planes as translucent rectangles
+        try:
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: PLC0415
+            for y_plane, fc in [(-gap, "cyan"), (+gap, "lightyellow")]:
+                verts = [[
+                    [-x_half, y_plane, -z_half], [ x_half, y_plane, -z_half],
+                    [ x_half, y_plane,  z_half], [-x_half, y_plane,  z_half],
+                ]]
+                poly = Poly3DCollection(verts, alpha=0.13,
+                                        facecolor=fc, edgecolor="grey",
+                                        linewidths=0.5)
+                ax.add_collection3d(poly)
+        except ImportError:
+            pass   # very unlikely — mpl_toolkits ships with matplotlib
+
+        # Anode wires (gold lines along z)
+        for i in range(n_wires):
+            xw = (i - (n_wires - 1) / 2.0) * pitch
+            ax.plot([xw, xw], [0.0, 0.0], [-z_half, z_half],
+                    color="gold", lw=1.2, zorder=3)
+
+        # ── Per-event tracks ──────────────────────────────────────────────────
+        # Primary electron drift line (blue)
+        ax.plot(data["primary_x"][ev], data["primary_y"][ev], data["primary_z"][ev],
+                color="royalblue", lw=1.8, label="Primary e⁻", zorder=5)
+
+        # Avalanche cloud: start positions of secondary electron tracks (orange)
+        cx = data["cloud_x"][ev]
+        cy = data["cloud_y"][ev]
+        cz = data["cloud_z"][ev]
+        if len(cx) > 0:
+            ax.scatter(cx, cy, cz, c="darkorange", s=4, alpha=0.5,
+                       label="Avalanche cloud", zorder=4, depthshade=False)
+
+        # Ion drift paths, colour-coded by destination cathode
+        ix    = data["ion_x"][ev]
+        iy    = data["ion_y"][ev]
+        iz    = data["ion_z"][ev]
+        inpts = data["ion_npts"][ev]
+        if len(inpts) > 0:
+            splits = np.concatenate([[0], np.cumsum(inpts)])
+            tol    = 0.01 * gap
+            for k in range(len(inpts)):
+                xs = ix[splits[k]:splits[k + 1]]
+                ys = iy[splits[k]:splits[k + 1]]
+                zs = iz[splits[k]:splits[k + 1]]
+                if len(ys) == 0:
+                    continue
+                y_end = float(ys[-1])
+                if abs(y_end - (-gap)) <= tol:
+                    color = "limegreen"   # → readout cathode
+                elif abs(y_end - gap) <= tol:
+                    color = "magenta"     # → non-readout cathode
+                else:
+                    color = "grey"        # absorbed / out of window
+                ax.plot(xs, ys, zs, color=color, lw=0.8, alpha=0.7)
+
+        # ── Axes / labels / legend ────────────────────────────────────────────
+        ax.set_xlabel("x [cm]", fontsize=8, labelpad=1)
+        ax.set_ylabel("y [cm]", fontsize=8, labelpad=1)
+        ax.set_zlabel("z [cm]", fontsize=8, labelpad=1)
+        ax.set_title(f"{label},  event {ev + 1}", fontsize=9)
+        ax.set_xlim(-x_half,    x_half)
+        ax.set_ylim(-gap * 1.15, gap * 1.15)
+        ax.set_zlim(-z_half,    z_half)
+        ax.tick_params(labelsize=7)
+
+        # Build a compact legend (deduplicate auto-entries, add ion colour proxies)
+        from matplotlib.lines import Line2D  # noqa: PLC0415
+        handles, labs = ax.get_legend_handles_labels()
+        by_label = dict(zip(labs, handles))
+        by_label["Ion → readout"]     = Line2D([0], [0], color="limegreen", lw=1.5)
+        by_label["Ion → non-readout"] = Line2D([0], [0], color="magenta",   lw=1.5)
+        ax.legend(by_label.values(), by_label.keys(),
+                  loc="upper right", fontsize=7, framealpha=0.6)
+
+        self.tracks_canvas.figure.tight_layout()
+        self.tracks_canvas.draw_idle()
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +994,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._runner: SimRunner | None = None
+        self._last_loaded_config_path: str | None = None
 
         binary_ok = BINARY.exists()
         suffix = "" if binary_ok else "  ⚠ Binary not found — build first"
@@ -638,6 +1075,14 @@ class MainWindow(QMainWindow):
 
         self.act_run.setEnabled(False)
         self.act_stop.setEnabled(True)
+
+        if self._last_loaded_config_path:
+            self.results_panel.append_log(
+                f"[GUI] Config based on: {self._last_loaded_config_path}"
+            )
+        else:
+            self.results_panel.append_log("[GUI] Config from widget defaults")
+
         self._runner.start()
 
     def _on_stop(self):
@@ -659,7 +1104,8 @@ class MainWindow(QMainWindow):
 
         self.results_panel.populate_table(csv_path)
         self.results_panel.draw_plots(csv_path)
-        self.results_panel.draw_waveforms(root_path)
+        self.results_panel.load_waveform_data(root_path)
+        self.results_panel.load_track_data(root_path, run_dir)
         self.results_panel.setCurrentIndex(1)   # switch to Summary tab
 
     def _on_run_failed(self, msg: str):
@@ -682,6 +1128,7 @@ class MainWindow(QMainWindow):
             with open(path) as f:
                 d = json.load(f)
             self.config_panel.load_from_dict(d)
+            self._last_loaded_config_path = path
             self.statusBar().showMessage(f"Config loaded from {path}")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Load failed", str(exc))

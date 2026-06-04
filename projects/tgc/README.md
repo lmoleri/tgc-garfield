@@ -47,8 +47,8 @@ gradient that enables high gas gain at modest applied voltages.
   Source distance sign convention
   ─────────────────────────────────────────────
    0 mm → wire plane centre (y = 0)
-  +d mm → cathode_top side  (y = +d/10 cm)
-  −d mm → readout pad side  (y = −d/10 cm)
+  +d mm → readout pad side  (y = −d/10 cm)
+  −d mm → cathode_top side  (y = +d/10 cm)
 ```
 
 | Parameter         | Value        | Notes                               |
@@ -121,6 +121,18 @@ All avalanche electrons are tracked until they are collected by a wire or absorb
 
 A `max_avalanche_size` cap prevents runaway events from consuming excessive CPU.
 
+### 3b. Ion drift — DriftLineRKF
+
+`AvalancheMicroscopic` counts the ions produced (`ni`) but does not transport them.
+After each avalanche, the simulation iterates over every electron track endpoint
+returned by `GetElectronEndpoints()`: the **start position** of track 0 is the primary
+photoionisation ion; the start positions of tracks 1…n are the positions of avalanche
+ions created in ionising collisions near the wire.  Each ion is transported by
+`DriftLineRKF::DriftIon()` using the CO2⁺ mobility loaded from the Garfield++ data
+directory, and its Ramo-theorem induced current is added to the sensor.
+
+This is the dominant CPU cost for events with large avalanches (see Performance notes).
+
 ### 4. Signal induction — Shockley-Ramo theorem
 
 `Sensor` computes the induced current on each electrode at every step using the weighting
@@ -141,16 +153,30 @@ Two readout channels are defined:
 
 ## Gas file
 
-The first run generates `ar_70_co2_30.gas` in the working directory.  Magboltz runs
-`n_magboltz_collisions` collision cycles per field point (default: 10; smoke test: 5).
-This takes roughly **5–15 minutes** for the default settings.
+The gas file name is derived automatically from the gas configuration parameters —
+there is no `gas_file` key in the config.  The naming scheme is:
 
-To skip regeneration on subsequent runs, place the `.gas` file at the path given by
-`gas.gas_file` in the config (default: `ar_70_co2_30.gas` in the current working
-directory).  You can move or rename it and update the config key accordingly.
+```
+ar70_co2_30_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen|nopen}.gas
+```
 
-To regenerate with higher accuracy, increase `n_magboltz_collisions` (20–50 is
-recommended for publication-quality results) and delete the existing `.gas` file.
+For the default config this produces:
+`ar70_co2_30_T293_P760_Ee2000_Ef400k_n20_c10_pen.gas`
+
+The file is written to (and looked up from) the working directory of the binary,
+which is `projects/tgc/` when run via the GUI or with the standard CMake invocation.
+
+**On first run**: if the file does not exist, Magboltz generates it.  This takes
+roughly **5–15 minutes** for the default settings (`n_magboltz_collisions = 10`).
+The GUI shows `[will be generated]` next to the derived name before you click Run.
+
+**On subsequent runs**: the file is loaded instantly.
+
+**To regenerate with higher accuracy**: increase `n_magboltz_collisions` (20–50 is
+recommended for publication-quality results).  Because the name encodes `c{n}`, a
+new filename is derived automatically and the old cached file is left untouched.
+
+**To regenerate from scratch**: delete the `.gas` file from `projects/tgc/`.
 
 ---
 
@@ -293,51 +319,42 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 
 | Key                | Type  | Unit | Default | Description                         |
 |--------------------|-------|------|---------|-------------------------------------|
-| `wire_pitch_cm`    | float | cm   | 0.18    | Centre-to-centre wire spacing       |
-| `wire_diameter_um` | float | μm   | 50.0    | Wire outer diameter                 |
-| `gap_cm`           | float | cm   | 0.14    | Distance from wire plane to cathode |
-| `n_wires`          | int   | —    | 10      | Number of anode wires               |
-| `wire_voltage_V`   | float | V    | 1900.0  | Voltage applied to all wires        |
+| `wire_pitch_cm`    | float | cm   | 0.18    | Centre-to-centre wire spacing. Sets the periodicity of the analytic field solution; changing this alters the electric-field map and weighting fields computed by `ComponentAnalyticField` |
+| `wire_diameter_um` | float | μm   | 50.0    | Wire outer diameter (radius = value/2 μm). Sets the inner boundary of the avalanche region; thinner wires produce a higher peak field and larger gas gain for the same voltage |
+| `gap_cm`           | float | cm   | 0.14    | Distance from the wire plane to **each** cathode (the geometry is symmetric: both gaps equal this value). Increasing the gap reduces the average drift field, lowering gain |
+| `n_wires`          | int   | —    | 10      | Number of anode wires in the simulation cell. More wires increase the sensitive area but do not change single-wire physics |
+| `wire_voltage_V`   | float | V    | 1900.0  | High voltage applied to all anode wires (cathodes grounded). Primary handle for tuning gas gain; a ~100 V change shifts gain by roughly one order of magnitude |
 
 ### `source`
 
 | Key                   | Type          | Unit | Default              | Description                                               |
 |-----------------------|---------------|------|----------------------|-----------------------------------------------------------|
-| `energy_keV`          | float         | keV  | 5.9                  | Photon energy (Fe-55 K-alpha line)                        |
-| `source_distances_mm` | float array   | mm   | [0.2, 0.5, 0.9, 1.2] | Source y-distances from wire plane to scan                |
-| `x_position_cm`       | float or null | cm   | null                 | Fixed photon x-position; `null` = uniform random over wires |
-
-`source_distances_mm` is the scan axis.  Each value is the signed y-coordinate (in mm) at
-which the primary electrons are placed, measured from the wire plane (y = 0).
-
-* **Positive** values place the electrons on the **cathode_top** (non-readout) side.
-* **Negative** values place them on the **readout cathode** side.
-* 0 is at the wire plane (useful for symmetry checks).
-
-Values are clamped to the range (−`gap_cm`×10, +`gap_cm`×10) — i.e. strictly inside the gas gap.
+| `energy_keV`          | float         | keV  | 5.9                  | Photon energy of the simulated X-ray source (Fe-55 K-alpha line). Determines the number of primary electrons via `N = round(E_photon[eV] / w_value_eV)` (≈227 for Fe-55 at 5.9 keV and W = 26 eV) |
+| `source_distances_mm` | float array   | mm   | [0.2, 0.5, 0.9, 1.2] | List of signed y-positions (mm) at which primary electrons are placed, measured from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). Each distance is a separate simulation run. Values are clamped to (−`gap_cm`×10, +`gap_cm`×10) |
+| `x_position_cm`       | float or null | cm   | null                 | Fixed lateral (x) position for the photon interaction point. `null` draws a uniform random position over the wire array each event, averaging over the wire-gap geometry. Set to a specific value to study a fixed impact point (e.g. directly above a wire vs. midgap) |
 
 ### `gas`
 
 | Key                     | Type   | Unit  | Default                   | Description                                      |
 |-------------------------|--------|-------|---------------------------|--------------------------------------------------|
-| `temperature_K`         | float  | K     | 293.15                    | Gas temperature                                  |
-| `pressure_Torr`         | float  | Torr  | 760.0                     | Gas pressure                                     |
-| `gas_file`              | string | —     | "ar_70_co2_30_e400.gas"   | Path to gas table (generated if absent)          |
-| `enable_penning`        | bool   | —     | true                      | Enable Penning transfer (recommended for Ar:CO2) |
-| `n_magboltz_collisions` | int    | —     | 10                        | Magboltz collision cycles per field point        |
-| `max_electron_energy_eV`| float  | eV    | 2000.0                    | Energy ceiling for electron collision table; must be higher than the max kinetic energy electrons reach near the wire |
-| `n_field_points`        | int    | —     | 20                        | Points in the log-spaced E-field grid            |
-| `e_field_max_vcm`       | float  | V/cm  | 300000.0                  | Upper E-field limit for the gas table            |
-| `w_value_eV`            | float  | eV    | 26.0                      | Effective ionisation energy W (primary e⁻ count = E/W) |
+| `temperature_K`         | float  | K     | 293.15                    | Gas temperature passed to Magboltz. Affects gas number density (n ∝ 1/T at fixed pressure), which shifts drift velocity and Townsend coefficients. Must match physical detector conditions; 293.15 K = 20 °C |
+| `pressure_Torr`         | float  | Torr  | 760.0                     | Gas pressure passed to Magboltz. Together with temperature, sets gas density. 760 Torr = 1 atm. Reducing pressure increases mean free path and electron energy, raising gain |
+| `enable_penning`        | bool   | —     | true                      | Activates Penning transfer via `MediumMagboltz::EnablePenningTransfer()`. In Ar:CO2 70:30 this raises the effective Townsend coefficient by ~20–40 %, bringing simulated gain closer to measured values. Should be left on for this mixture |
+| `n_magboltz_collisions` | int    | —     | 10                        | Monte Carlo collision cycles Magboltz runs per E-field grid point. Higher values reduce statistical uncertainty in transport coefficients at the cost of longer gas-file generation. 2–5: smoke test; 10: default; 20–50: publication quality |
+| `max_electron_energy_eV`| float  | eV    | 2000.0                    | Upper energy bound for the Magboltz cross-section look-up table. Must exceed the maximum kinetic energy electrons reach near the wire (typically 500–1000 eV here). Too low a ceiling causes Magboltz to extrapolate, producing unphysical transport coefficients |
+| `n_field_points`        | int    | —     | 20                        | Number of logarithmically spaced E-field values at which Magboltz computes transport coefficients (from ~100 V/cm to `e_field_max_vcm`). More points give smoother interpolation; fewer points speed up gas-file generation |
+| `e_field_max_vcm`       | float  | V/cm  | 300000.0                  | Maximum electric field in the Magboltz transport table. Must comfortably exceed the peak field on the wire surface (~200–400 kV/cm here). If the microscopic transport reaches fields beyond this limit, Magboltz extrapolates and results become unreliable |
+| `w_value_eV`            | float  | eV    | 26.0                      | Mean energy to create one electron–ion pair in the gas mixture (W-value). Determines primary electron count: `N = round(energy_keV × 1000 / w_value_eV)`. The measured value for Ar:CO2 70:30 is ~26 eV |
 
 ### `simulation`
 
 | Key                  | Type  | Unit | Default  | Description                                     |
 |----------------------|-------|------|----------|-------------------------------------------------|
-| `n_events`           | int   | —    | 1000     | Number of events per source distance            |
-| `max_avalanche_size` | int   | —    | 500000   | Electron count cap per `AvalancheElectron` call |
-| `time_window_ns`     | float | ns   | 300.0    | Signal collection window                        |
-| `time_step_ns`       | float | ns   | 0.5      | Signal time bin width                           |
+| `n_events`           | int   | —    | 1000     | Number of avalanche simulations per source distance. More events reduce statistical uncertainty on mean charge and charge ratio (SEM ∝ 1/√N). 10 is enough for a quick check; 1000 gives ~3 % SEM on gain |
+| `max_avalanche_size` | int   | —    | 500000   | Maximum number of electrons tracked per `AvalancheMicroscopic` call. Truncates runaway avalanches to prevent excessive CPU use. Reduce to ~10 000 for fast exploratory runs (biases the high-gain tail). Note: each avalanche electron corresponds to one `DriftLineRKF::DriftIon` call, so smaller values also reduce ion-drift CPU cost |
+| `time_window_ns`     | float | ns   | 300.0    | Duration of the induced-current waveform recorded on each electrode. 300 ns captures the full electron component (collected in ≲20 ns) and the first ~34 % of the slow ion tail (~8 μs total) |
+| `time_step_ns`       | float | ns   | 0.5      | Width of each time bin in the `TProfile` waveforms (`p_anode_signal`, `p_cathode_signal`). Finer bins give better time resolution but larger ROOT histograms. 0.5 ns is sufficient to resolve the fast electron peak (~5–10 ns FWHM) |
+| `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
 
 ---
 

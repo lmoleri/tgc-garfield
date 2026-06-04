@@ -15,15 +15,15 @@
     "temperature_K": 293.15,
     "pressure_Torr": 760.0,
     "enable_penning": true,
-    "n_magboltz_collisions": 10,
+    "n_magboltz_collisions": 2,
     "max_electron_energy_eV": 2000.0,
-    "n_field_points": 20,
+    "n_field_points": 10,
     "e_field_max_vcm": 400000.0,
     "w_value_eV": 26.0
   },
   "simulation": {
-    "n_events": 1000,
-    "max_avalanche_size": 500000,
+    "n_events": 10,
+    "max_avalanche_size": 10000,
     "time_window_ns": 300.0,
     "time_step_ns": 0.5,
     "enable_ion_drift": true
