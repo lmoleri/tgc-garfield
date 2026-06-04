@@ -50,9 +50,10 @@ from PyQt5.QtWidgets import (
 # Paths
 # ---------------------------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).parent.resolve()   # …/projects/tgc/gui/
-TGC_DIR    = (SCRIPT_DIR / "..").resolve()     # …/projects/tgc/
-BINARY     = TGC_DIR / "build" / "tgc_sim"
+SCRIPT_DIR       = Path(__file__).parent.resolve()              # …/projects/tgc/gui/
+TGC_DIR          = (SCRIPT_DIR / "..").resolve()                # …/projects/tgc/
+BINARY           = TGC_DIR / "build" / "tgc_sim"
+GARFIELD_INSTALL = (TGC_DIR / "../../local/garfield").resolve() # …/local/garfield/
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,10 @@ class SimRunner(QThread):
 
         cmd = [str(BINARY), "--config", tmp_cfg, "--out", self._out_dir]
 
+        env = os.environ.copy()
+        env["GARFIELD_INSTALL"] = str(GARFIELD_INSTALL)
+        env["HEED_DATABASE"] = str(GARFIELD_INSTALL / "share" / "Heed" / "database")
+
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -103,6 +108,7 @@ class SimRunner(QThread):
                 text=True,
                 bufsize=1,
                 cwd=str(TGC_DIR),   # relative gas-file paths resolve from here
+                env=env,
             )
             for line in self._proc.stdout:
                 self.log_line.emit(line.rstrip())
@@ -193,7 +199,7 @@ class ConfigPanel(QScrollArea):
         gas_row  = QWidget()
         gas_h    = QHBoxLayout(gas_row)
         gas_h.setContentsMargins(0, 0, 0, 0)
-        self.gas_file = QLineEdit("ar_70_co2_30.gas")
+        self.gas_file = QLineEdit("ar_70_co2_30_e400.gas")
         self.gas_file.setToolTip("Path to the Magboltz gas table file")
         btn_gas = QPushButton("…")
         btn_gas.setFixedWidth(28)
@@ -205,12 +211,15 @@ class ConfigPanel(QScrollArea):
         self.penning.setChecked(True)
         self.ncoll = self._spin(1, 100, 10)
         self.ncoll.setToolTip("Magboltz collision cycles per field point (higher = more accurate)")
+        self.w_value = self._dspin(10.0, 100.0, 0.5, 1, 26.0)
+        self.w_value.setToolTip("Effective ionisation energy W [eV per ion pair] for primary electron count")
 
         gas_form.addRow("Temperature [K]",     self.temperature)
         gas_form.addRow("Pressure [Torr]",     self.pressure)
         gas_form.addRow("Gas file",            gas_row)
         gas_form.addRow("Penning transfer",    self.penning)
         gas_form.addRow("Magboltz ncoll",      self.ncoll)
+        gas_form.addRow("W-value [eV]",        self.w_value)
         root_layout.addWidget(gas_box)
 
         # ── Simulation ────────────────────────────────────────────────────
@@ -313,6 +322,7 @@ class ConfigPanel(QScrollArea):
                 "gas_file":              self.gas_file.text(),
                 "enable_penning":        self.penning.isChecked(),
                 "n_magboltz_collisions": self.ncoll.value(),
+                "w_value_eV":            self.w_value.value(),
             },
             "simulation": {
                 "n_events":           self.n_events.value(),
@@ -345,9 +355,10 @@ class ConfigPanel(QScrollArea):
         gas = d.get("gas", {})
         self.temperature.setValue(gas.get("temperature_K", 293.15))
         self.pressure.setValue(   gas.get("pressure_Torr", 760.0))
-        self.gas_file.setText(    gas.get("gas_file", "ar_70_co2_30.gas"))
+        self.gas_file.setText(    gas.get("gas_file", "ar_70_co2_30_e400.gas"))
         self.penning.setChecked(  gas.get("enable_penning", True))
         self.ncoll.setValue(      gas.get("n_magboltz_collisions", 10))
+        self.w_value.setValue(    gas.get("w_value_eV", 26.0))
 
         sim = d.get("simulation", {})
         self.n_events.setValue(   sim.get("n_events", 1000))

@@ -14,9 +14,13 @@
   "gas": {
     "temperature_K": 293.15,
     "pressure_Torr": 760.0,
-    "gas_file": "ar_70_co2_30.gas",
+    "gas_file": "ar_70_co2_30_e400.gas",
     "enable_penning": true,
-    "n_magboltz_collisions": 10
+    "n_magboltz_collisions": 10,
+    "max_electron_energy_eV": 2000.0,
+    "n_field_points": 20,
+    "e_field_max_vcm": 300000.0,
+    "w_value_eV": 26.0
   },
   "simulation": {
     "n_events": 1000,

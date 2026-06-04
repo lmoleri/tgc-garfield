@@ -2,13 +2,15 @@
 //
 // Geometry : 10 anode wires (50 μm diameter, 1.8 mm pitch) at y = 0,
 //            two grounded cathode planes at y = ±gap_cm.
+//            y > 0 is the non-readout ("cathode_top") side;
+//            y < 0 is the readout pad ("cathode") side.
 // Gas      : Ar:CO2 70:30, 1 atm, 293.15 K.
-// Source   : 5.9 keV Fe-55 X-ray photon at configurable depth in the gas gap,
-//            travelling perpendicular to the wire plane (−y direction).
+// Source   : N = E/W primary electrons placed at a configurable distance from
+//            the wire plane (signed: positive → cathode_top side).
+//            N is computed from the photon energy and the gas W-value.
 // Readout  : (1) all wires as a single "anode" channel,
 //            (2) the bottom cathode plane as a "cathode" channel.
 //
-// Primary ionisation is handled by TrackHeed::TransportPhoton.
 // Each primary electron is transported by AvalancheMicroscopic.
 // Induced signals are computed via Shockley-Ramo weighting fields.
 
@@ -43,7 +45,6 @@
 #include "Garfield/FundamentalConstants.hh"
 #include "Garfield/MediumMagboltz.hh"
 #include "Garfield/Sensor.hh"
-#include "Garfield/TrackHeed.hh"
 #include "nlohmann/json.hpp"
 
 namespace fs = std::filesystem;
@@ -54,11 +55,8 @@ using Garfield::AvalancheMicroscopic;
 using Garfield::ComponentAnalyticField;
 using Garfield::MediumMagboltz;
 using Garfield::Sensor;
-using Garfield::TrackHeed;
 using json = nlohmann::json;
 
-// 1 elementary charge in femtoCoulombs (Garfield++ unit convention)
-constexpr double kElemChargeFC = Garfield::ElementaryCharge;
 
 // ─── Configuration structs ────────────────────────────────────────────────────
 
@@ -77,11 +75,15 @@ struct SourceConfig {
 };
 
 struct GasConfig {
-  double temperatureK    = 293.15;
-  double pressureTorr    = 760.0;
-  std::string gasFile    = "ar_70_co2_30.gas";
-  bool   enablePenning   = true;
-  int    nCollisions     = 10;
+  double temperatureK        = 293.15;
+  double pressureTorr        = 760.0;
+  std::string gasFile        = "ar_70_co2_30_e400.gas";
+  bool   enablePenning       = true;
+  int    nCollisions         = 10;
+  double maxElectronEnergyEV = 400.0;
+  int    nFieldPoints        = 20;         // number of E-field grid points for Magboltz
+  double eFieldMaxVcm        = 300000.0;  // upper E-field limit [V/cm] for the gas table
+  double wValueEV            = 26.0;      // effective ionisation energy [eV per ion pair]
 };
 
 struct SimulationConfig {
@@ -321,7 +323,11 @@ Config LoadConfig(const fs::path& path) {
     cfg.gas.pressureTorr  = ReadDouble(*g, "gas", "pressure_Torr",       cfg.gas.pressureTorr);
     cfg.gas.gasFile       = ReadString(*g, "gas", "gas_file",             cfg.gas.gasFile);
     cfg.gas.enablePenning = ReadBool  (*g, "gas", "enable_penning",       cfg.gas.enablePenning);
-    cfg.gas.nCollisions   = ReadInt   (*g, "gas", "n_magboltz_collisions", cfg.gas.nCollisions);
+    cfg.gas.nCollisions         = ReadInt   (*g, "gas", "n_magboltz_collisions",  cfg.gas.nCollisions);
+    cfg.gas.maxElectronEnergyEV = ReadDouble(*g, "gas", "max_electron_energy_eV", cfg.gas.maxElectronEnergyEV);
+    cfg.gas.nFieldPoints        = ReadInt   (*g, "gas", "n_field_points",         cfg.gas.nFieldPoints);
+    cfg.gas.eFieldMaxVcm        = ReadDouble(*g, "gas", "e_field_max_vcm",        cfg.gas.eFieldMaxVcm);
+    cfg.gas.wValueEV            = ReadDouble(*g, "gas", "w_value_eV",             cfg.gas.wValueEV);
   }
 
   if (const auto* s = FindSection(root, "simulation")) {
@@ -355,12 +361,24 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   if (fs::exists(cfg.gasFile)) {
     std::cout << "  Loading gas table from: " << cfg.gasFile << "\n";
     gas.LoadGasFile(cfg.gasFile);
+    // LoadGasFile restores the EFINAL ceiling stored in the file.  Override it
+    // so the collision-rate table for AvalancheMicroscopic is pre-built to a
+    // high enough energy to cover electrons near the wire (~160 kV/cm at 1900 V
+    // can push electrons past 400 eV), preventing silent transport aborts.
+    gas.SetMaxElectronEnergy(cfg.maxElectronEnergyEV);
   } else {
     std::cout << "  Gas file not found: " << cfg.gasFile << "\n"
-              << "  Running Magboltz to generate gas table (this may take several minutes)...\n";
-    // Logarithmically-spaced field grid from gentle drift region to near-wire avalanche
-    gas.SetFieldGrid(100., 300000., 20, /*logspacing=*/true);
-    gas.GenerateGasTable(cfg.nCollisions);
+              << "  Running Magboltz for " << cfg.nFieldPoints
+              << " field points up to " << static_cast<int>(cfg.eFieldMaxVcm) << " V/cm"
+              << " (first run: ~5 min for smoke grid, ~1-2 h for full grid)...\n";
+    // Set energy ceiling before generation — electrons near the wire (>100 kV/cm
+    // at 1900 V) reach energies well above Magboltz's default ~40 eV ceiling.
+    gas.SetMaxElectronEnergy(cfg.maxElectronEnergyEV);
+    // Logarithmically-spaced field grid from gentle drift region to near-wire avalanche.
+    // At E>100 kV/cm the Magboltz SST/TOF tracks millions of avalanche electrons and
+    // can take hours; reduce e_field_max_vcm / n_field_points for faster smoke runs.
+    gas.SetFieldGrid(100., cfg.eFieldMaxVcm, cfg.nFieldPoints, /*logspacing=*/true);
+    gas.GenerateGasTable(cfg.nCollisions, /*verbose=*/false);
     gas.WriteGasFile(cfg.gasFile);
     std::cout << "  Gas table saved to: " << cfg.gasFile << "\n";
   }
@@ -444,7 +462,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   const auto& sim  = cfg.simulation;
 
   const double sourceYCm = sourceDistanceMm * 0.1; // mm → cm
-  // Clamp to strictly inside the gas gap so TrackHeed finds an ionisable medium
+  // Clamp to strictly inside the gas gap (away from cathode surfaces)
   const double y0 = std::max(-geom.gapCm + 1.e-4,
                               std::min(geom.gapCm - 1.e-4, sourceYCm));
   // Half-span of the wire array for random x sampling
@@ -460,8 +478,6 @@ DistanceSummary RunDistancePoint(const Config& cfg,
                  "Induced charge on cathode;Q_{cathode} [fC];Events", 200, 0., 0.);
   TH1D hRatio("h_ratio_charge",
               "Charge ratio;Q_{cathode}/Q_{anode};Events", 100, 0., 2.);
-  TH1D hNclusters("h_n_clusters",
-                  "Primary clusters per event;N_{clusters};Events", 5, 0.5, 5.5);
   TH1D hNprimary("h_n_primary_electrons",
                  "Primary electrons per event;N_{e,primary};Events", 400, -0.5, 399.5);
   TH1D hAvalSize("h_avalanche_size",
@@ -476,13 +492,15 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
   for (TH1* h : std::initializer_list<TH1*>{
            &hAnodeQ, &hCathodeQ, &hRatio,
-           &hNclusters, &hNprimary, &hAvalSize,
+           &hNprimary, &hAvalSize,
            &pAnodeSignal, &pCathodeSignal}) {
     h->SetDirectory(nullptr);
   }
 
   // ── Transport objects ────────────────────────────────────────────────────────
-  TrackHeed track(&sensor);
+  // Average primary electrons: N = E_photon / W-value (e.g. 5900 eV / 26 eV ≈ 227)
+  const int nPrimary = std::max(1,
+      static_cast<int>(std::round(cfg.source.energyKeV * 1.e3 / cfg.gas.wValueEV)));
 
   AvalancheMicroscopic aval(&sensor);
   if (sim.maxAvalancheSize > 0) aval.EnableAvalancheSizeLimit(sim.maxAvalancheSize);
@@ -504,49 +522,51 @@ DistanceSummary RunDistancePoint(const Config& cfg,
                           ? *cfg.source.fixedXCm
                           : gRandom->Uniform(-xHalfWires, xHalfWires);
 
-    // Transport the 5.9 keV photon downward (−y direction).
-    // TransportPhoton fully handles the photoelectric absorption, delta-electron
-    // cascade, and returns conduction electrons ready for AvalancheMicroscopic.
-    // If the photon exits the active volume without being absorbed,
-    // cluster.electrons is empty (physically correct: low cross-section in 1.4 mm).
-    auto cluster = track.TransportPhoton(
-        x0, y0, 0., 0.,
-        cfg.source.energyKeV * 1.e3, // energy in eV
-        0., -1., 0.);                // direction: straight down
-
-    const int nPrimary = static_cast<int>(cluster.electrons.size());
-    if (nPrimary == 0) {
-      // Photon passed through without interacting — skip this event.
-      // The interaction fraction printed in the summary shows how often this happens.
-      continue;
-    }
-
+    // Transport one representative electron from (x0, y0, 0) and scale all results
+    // by nPrimary.  This is exact for the mean Q_cathode/Q_anode ratio (the key
+    // observable): all electrons start at the same position, and the Shockley-Ramo
+    // weighting is linear in charge, so scaling by nPrimary gives the correct
+    // expected total charge and ratio.  Running nPrimary independent avalanches
+    // would only add ~1/sqrt(nPrimary) statistical noise on top of the much larger
+    // single-avalanche (Polya) fluctuation — not worth the ~227× runtime cost.
     ++nInteracted;
-    hNclusters.Fill(1.); // one photoabsorption = one cluster
     hNprimary.Fill(nPrimary);
     primaryCounts.push_back(static_cast<double>(nPrimary));
 
-    // Note: any secondary fluorescence photons (e.g. Ar K-alpha at ~2.96 keV)
-    // are in cluster.photons and not processed here.  Their contribution is
-    // small and can be added by calling TransportPhoton again for each entry.
+    aval.AvalancheElectron(x0, y0, 0., 0., 0.1); // 0.1 eV ≈ thermal
+    int ne = 0, ni = 0;
+    aval.GetAvalancheSize(ne, ni);
+    const int totalAvalElectrons = ne * nPrimary;
 
-    // Run AvalancheMicroscopic for every primary electron.
-    // Signals from all avalanches accumulate in the sensor (m_nEvents stays = 1).
-    int totalAvalElectrons = 0;
-    for (const auto& elec : cluster.electrons) {
-      aval.AvalancheElectron(elec.x, elec.y, elec.z, elec.t, elec.e);
-      int ne = 0, ni = 0;
-      aval.GetAvalancheSize(ne, ni);
-      totalAvalElectrons += ne;
-    }
     hAvalSize.Fill(static_cast<double>(totalAvalElectrons));
     avalancheSizes.push_back(static_cast<double>(totalAvalElectrons));
 
-    // Collect total induced charge on each electrode for this event.
-    // GetInducedCharge returns in elementary charges; multiply by kElemChargeFC
-    // (= 1.602e-4 fC/e) to obtain femtoCoulombs.
-    const double qAnode   = sensor.GetInducedCharge("anode")   * kElemChargeFC;
-    const double qCathode = sensor.GetInducedCharge("cathode") * kElemChargeFC;
+    // Integrate the binned induced-current signal to obtain charge.
+    // GetSignal returns the induced current in fC/ns; multiplying by the bin
+    // width (ns) and summing gives charge in fC.  Scale by nPrimary.
+    //
+    // Sign convention (Shockley-Ramo, confirmed by inspection of ROOT output):
+    //   anode   : dominated by electron collection → net integral is NEGATIVE
+    //             → negate to obtain the conventionally positive collected charge
+    //   cathode : dominated by ion drift toward pad → net integral is POSITIVE
+    //
+    // NOTE: Sensor::GetInducedCharge() uses a separate per-electrode "charge"
+    // accumulator that AvalancheMicroscopic does not populate (it only calls
+    // AddSignal into the time-binned arrays), so GetInducedCharge always returns
+    // zero here.  The manual integral below is the correct approach.
+    double rawAnode = 0., rawCathode = 0.;
+    for (std::size_t k = 0; k < nBins; ++k) {
+      const double sigA = sensor.GetSignal("anode",   k);
+      const double sigC = sensor.GetSignal("cathode", k);
+      rawAnode   += sigA;
+      rawCathode += sigC;
+      const double t = (static_cast<double>(k) + 0.5) * sim.timeStepNs;
+      pAnodeSignal.Fill(t,   sigA * nPrimary);
+      pCathodeSignal.Fill(t, sigC * nPrimary);
+    }
+
+    const double qAnode   = -rawAnode   * sim.timeStepNs * nPrimary; // [fC]
+    const double qCathode =  rawCathode * sim.timeStepNs * nPrimary; // [fC]
 
     hAnodeQ.Fill(qAnode);
     hCathodeQ.Fill(qCathode);
@@ -559,18 +579,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       chargeRatios.push_back(ratio);
     }
 
-    // Accumulate average signal waveforms.
-    // GetSignal(label, bin) returns induced current in fC/ns for that time bin.
-    for (std::size_t k = 0; k < nBins; ++k) {
-      const double t = (static_cast<double>(k) + 0.5) * sim.timeStepNs;
-      pAnodeSignal.Fill(t,   sensor.GetSignal("anode",   k));
-      pCathodeSignal.Fill(t, sensor.GetSignal("cathode", k));
-    }
-
     if ((ev + 1) % progressStep == 0 || ev + 1 == sim.nEvents) {
       std::cout << "  dist=" << FormatNumber(sourceDistanceMm) << " mm: "
                 << (ev + 1) << "/" << sim.nEvents
-                << " events processed, " << nInteracted << " interacted\n";
+                << " events processed\n";
     }
   }
 
@@ -580,7 +592,6 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     hAnodeQ.Write("h_anode_charge");
     hCathodeQ.Write("h_cathode_charge");
     hRatio.Write("h_ratio_charge");
-    hNclusters.Write("h_n_clusters");
     hNprimary.Write("h_n_primary_electrons");
     hAvalSize.Write("h_avalanche_size");
     pAnodeSignal.Write("p_anode_signal");
@@ -714,7 +725,11 @@ json ConfigToJson(const Config& cfg) {
       {"pressure_Torr",         cfg.gas.pressureTorr},
       {"gas_file",              cfg.gas.gasFile},
       {"enable_penning",        cfg.gas.enablePenning},
-      {"n_magboltz_collisions", cfg.gas.nCollisions}
+      {"n_magboltz_collisions",  cfg.gas.nCollisions},
+      {"max_electron_energy_eV", cfg.gas.maxElectronEnergyEV},
+      {"n_field_points",         cfg.gas.nFieldPoints},
+      {"e_field_max_vcm",        cfg.gas.eFieldMaxVcm},
+      {"w_value_eV",             cfg.gas.wValueEV}
     }},
     {"simulation", {
       {"n_events",          cfg.simulation.nEvents},
@@ -738,6 +753,10 @@ std::string BuildRunFolderName(const Config& cfg) {
 
 int main(int argc, char* argv[]) {
   try {
+    // Flush cout after every write so the GUI log panel streams in real time
+    // even when stdout is a pipe (pipes switch cout to full buffering by default).
+    std::cout << std::unitbuf;
+
     gROOT->SetBatch(true);
     gStyle->SetOptStat(1110);
     TH1::AddDirectory(false);

@@ -1,10 +1,10 @@
 # TGC Detector Simulation
 
 A Garfield++ simulation of a Thin Gap Chamber (TGC) multi-wire proportional detector.
-The simulation models primary ionisation from 5.9 keV Fe-55 X-rays, electron drift and
-avalanche multiplication, and the induced charge on both the wire plane (anode) and one
-cathode plane.  Results can be explored via a PyQt5 desktop GUI or the command-line
-binary directly.
+The simulation deposits primary ionisation electrons at a configurable depth in the gas
+gap, transports them through avalanche multiplication, and records the induced charge on
+both the wire plane (anode) and one cathode plane.  Results can be explored via a PyQt5
+desktop GUI or the command-line binary directly.
 
 ---
 
@@ -35,14 +35,20 @@ planes.  The small cathode-anode gap (here 1.4 mm) produces a steep electric-fie
 gradient that enables high gas gain at modest applied voltages.
 
 ```
-  y = +1.4 mm  ───────────────────────────────  cathode_top (0 V, ground)
+  y = +1.4 mm  ───────────────────────────────  cathode_top (0 V, ground / non-readout)
                ||||||||    gas gap    |||||||||
   y =  0.0 mm  ─ ○ ─ ○ ─ ○ ─ ○ ─ ○ ─ ○ ─ ○ ─  anode wires (+1900 V)
                ||||||||    gas gap    |||||||||
-  y = -1.4 mm  ───────────────────────────────  cathode (0 V, readout)
+  y = -1.4 mm  ───────────────────────────────  cathode (0 V, readout pad)
 
                ← 1.8 mm →
                wire pitch
+
+  Source distance sign convention
+  ─────────────────────────────────────────────
+   0 mm → wire plane centre (y = 0)
+  +d mm → cathode_top side  (y = +d/10 cm)
+  −d mm → readout pad side  (y = −d/10 cm)
 ```
 
 | Parameter         | Value        | Notes                               |
@@ -86,26 +92,29 @@ timescales.  The simulation loads the `IonMobility_CO2+_CO2.txt` table from the
 Garfield++ data directory.  Garfield++ stores one positive-ion mobility table per gas
 object; CO2⁺ is the best single-species approximation for this mixture.
 
-### 2. Primary ionisation — TrackHeed
+### 2. Primary ionisation — W-value model
 
-The 5.9 keV photon is transported by `TrackHeed::TransportPhoton`.  Heed uses detailed
-cross-section tables to simulate:
+For each simulated event, **N** primary electrons are deposited at the source position:
 
-* **Photoelectric absorption** in the gas (dominant at 5.9 keV in Ar:CO2).  The mean
-  free path at 1 atm is several centimetres, so only a small fraction of photons interact
-  in the 1.4 mm gap; the simulation skips non-interacting events and reports the
-  interaction fraction in the summary.
-* **Delta-electron cascade** — the photoelectron slows down and produces secondary
-  ionisation along its track.  With W ≈ 26 eV/pair for Ar:CO2, a 5.9 keV photon yields
-  roughly 220 primary electron-ion pairs.  All conduction electrons are returned with
-  position and kinetic energy, ready for `AvalancheMicroscopic`.
-* **Fluorescence photons** (Ar K-alpha, ~2.96 keV) may appear alongside the primary
-  cluster.  They are currently not re-transported; adding a second `TransportPhoton` call
-  for each fluorescence photon is a straightforward extension.
+```
+N = round( E_photon [eV] / W [eV/pair] )
+```
+
+For 5.9 keV Fe-55 and W = 26 eV/pair (Ar:CO2 70:30) this gives N ≈ 227.
+
+Rather than transporting all N electrons individually (which would multiply the CPU cost
+by ~227), the simulation runs **one representative avalanche** and scales the resulting
+induced charge and avalanche size by N.  This is exact for the mean Q_cathode/Q_anode
+ratio: all electrons start at the same position, so the Shockley-Ramo weighting is
+identical for each, and scaling is equivalent to superposing N independent avalanches.
+The event-to-event fluctuation in the charge ratio is dominated by the single-avalanche
+(Polya) variance rather than by the Poisson variance in N.
+
+The W-value is configurable via `gas.w_value_eV` (default 26 eV).
 
 ### 3. Electron avalanche — AvalancheMicroscopic
 
-Each primary electron is transported individually by `AvalancheMicroscopic`, which steps
+One representative electron is transported by `AvalancheMicroscopic`, which steps
 electrons through the gas using the Runge-Kutta-Fehlberg algorithm and samples elastic,
 inelastic, ionising, and attachment collisions from the Magboltz cross-section tables.
 All avalanche electrons are tracked until they are collected by a wire or absorbed.
@@ -252,6 +261,7 @@ been built yet, the window opens with a warning in the title bar.
 │    Pressure [Torr]   760       │                                         │
 │    Gas file  [ar_70…gas] […]  │                                         │
 │    Penning  [✓]  ncoll  10     │                                         │
+│    W-value [eV]  26.0          │                                         │
 │  ▼ Simulation                  │                                         │
 │    Events         1000         │                                         │
 │    Max aval. size 500000       │                                         │
@@ -297,25 +307,34 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `source_distances_mm` | float array   | mm   | [0.2, 0.5, 0.9, 1.2] | Source y-distances from wire plane to scan                |
 | `x_position_cm`       | float or null | cm   | null                 | Fixed photon x-position; `null` = uniform random over wires |
 
-`source_distances_mm` is the scan axis.  Each value is the y-coordinate (in mm) at which
-the photon is placed, measured from the wire plane (y = 0).  Values must lie in the range
-(0, `gap_cm` × 10).  The photon always travels in the −y direction.
+`source_distances_mm` is the scan axis.  Each value is the signed y-coordinate (in mm) at
+which the primary electrons are placed, measured from the wire plane (y = 0).
+
+* **Positive** values place the electrons on the **cathode_top** (non-readout) side.
+* **Negative** values place them on the **readout cathode** side.
+* 0 is at the wire plane (useful for symmetry checks).
+
+Values are clamped to the range (−`gap_cm`×10, +`gap_cm`×10) — i.e. strictly inside the gas gap.
 
 ### `gas`
 
-| Key                     | Type   | Unit | Default            | Description                                      |
-|-------------------------|--------|------|--------------------|--------------------------------------------------|
-| `temperature_K`         | float  | K    | 293.15             | Gas temperature                                  |
-| `pressure_Torr`         | float  | Torr | 760.0              | Gas pressure                                     |
-| `gas_file`              | string | —    | "ar_70_co2_30.gas" | Path to gas table (generated if absent)          |
-| `enable_penning`        | bool   | —    | true               | Enable Penning transfer (recommended for Ar:CO2) |
-| `n_magboltz_collisions` | int    | —    | 10                 | Magboltz collision cycles per field point        |
+| Key                     | Type   | Unit  | Default                   | Description                                      |
+|-------------------------|--------|-------|---------------------------|--------------------------------------------------|
+| `temperature_K`         | float  | K     | 293.15                    | Gas temperature                                  |
+| `pressure_Torr`         | float  | Torr  | 760.0                     | Gas pressure                                     |
+| `gas_file`              | string | —     | "ar_70_co2_30_e400.gas"   | Path to gas table (generated if absent)          |
+| `enable_penning`        | bool   | —     | true                      | Enable Penning transfer (recommended for Ar:CO2) |
+| `n_magboltz_collisions` | int    | —     | 10                        | Magboltz collision cycles per field point        |
+| `max_electron_energy_eV`| float  | eV    | 2000.0                    | Energy ceiling for electron collision table; must be higher than the max kinetic energy electrons reach near the wire |
+| `n_field_points`        | int    | —     | 20                        | Points in the log-spaced E-field grid            |
+| `e_field_max_vcm`       | float  | V/cm  | 300000.0                  | Upper E-field limit for the gas table            |
+| `w_value_eV`            | float  | eV    | 26.0                      | Effective ionisation energy W (primary e⁻ count = E/W) |
 
 ### `simulation`
 
 | Key                  | Type  | Unit | Default  | Description                                     |
 |----------------------|-------|------|----------|-------------------------------------------------|
-| `n_events`           | int   | —    | 1000     | Number of photon events per source distance     |
+| `n_events`           | int   | —    | 1000     | Number of events per source distance            |
 | `max_avalanche_size` | int   | —    | 500000   | Electron count cap per `AvalancheElectron` call |
 | `time_window_ns`     | float | ns   | 300.0    | Signal collection window                        |
 | `time_step_ns`       | float | ns   | 0.5      | Signal time bin width                           |
@@ -335,11 +354,10 @@ The ROOT file contains one subdirectory per source distance (e.g. `dist_0p7mm/`)
 
 | Object                  | Type     | Description                                     |
 |-------------------------|----------|-------------------------------------------------|
-| `h_anode_charge`        | TH1D     | Total induced charge on all wires [fC]          |
-| `h_cathode_charge`      | TH1D     | Total induced charge on bottom cathode [fC]     |
+| `h_anode_charge`        | TH1D     | Induced charge on all wires integrated over the 300 ns window [fC]; the electron component is fully collected, but the ion tail extends to ~5–8 μs so only ~⅓ of the ion contribution is captured |
+| `h_cathode_charge`      | TH1D     | Induced charge on bottom cathode integrated over the 300 ns window [fC]; same partial-collection caveat applies |
 | `h_ratio_charge`        | TH1D     | Q_cathode / Q_anode per event                   |
-| `h_n_clusters`          | TH1D     | Photoabsorption clusters per event (typically 1)|
-| `h_n_primary_electrons` | TH1D     | Primary electrons from TrackHeed per event      |
+| `h_n_primary_electrons` | TH1D     | Primary electrons per event (= round(E/W), constant) |
 | `h_avalanche_size`      | TH1D     | Total avalanche electrons per event             |
 | `p_anode_signal`        | TProfile | Mean induced current on anode vs time [fC/ns]   |
 | `p_cathode_signal`      | TProfile | Mean induced current on cathode vs time [fC/ns] |
@@ -383,21 +401,26 @@ The average anode waveform has two components:
 * **Fast electron component** (0–20 ns): electrons drift from their production point to
   the nearest wire.  The anode weighting potential peaks sharply near the wire surface,
   so the fast component carries the bulk of the induced charge.
-* **Slow ion component** (up to ~300 ns): positive ions (CO2⁺) drift away from the
-  wire toward both cathodes.  Their contribution to the anode signal has the same
+* **Slow ion component** (~5–8 μs physically): positive ions (CO2⁺) drift away from
+  the wire toward both cathodes.  Their contribution to the anode signal has the same
   (positive) polarity as the electron component, producing a long positive tail.
 
-The unprocessed simulation output (`p_anode_signal`) therefore shows a positive pulse that
-rises sharply in the first ~20 ns and decays slowly over several hundred nanoseconds — it
-is not bipolar.  A bipolar shape would appear after applying a differentiating RC filter
-(as real front-end amplifiers do), but no such shaping is modelled here.
+The full ion tail extends over ~5–8 μs (estimated from the CO2⁺ reduced mobility
+K₀ ≈ 1.7 cm²/(V·s) and the average gap field of ~13 600 V/cm).  The 300 ns simulation
+window captures only the first ~34 % of the ion-induced charge: in 300 ns the ions
+travel roughly 75 μm out of the 1.4 mm gap, but the Ramo weighting potential changes
+most rapidly near the wire, so the first fraction is disproportionately large.  Within
+the window, `p_anode_signal` shows a fast peak from electrons followed by a slowly
+decaying positive tail — it is not bipolar.  A bipolar shape would appear after a
+differentiating RC filter, which is not modelled here.
 
 ### Cathode signal shape (`p_cathode_signal`)
 
 The cathode signal is dominated by the slow ion component: as CO2⁺ ions drift from the
-wire plane toward the readout cathode, the cathode weighting potential rises monotonically
-and the induced current accumulates over ~100–300 ns.  The resulting signal is a slow,
-monotonically rising positive pulse.
+wire plane toward the readout cathode, the cathode weighting potential rises monotonically.
+The full induction extends over ~5–8 μs as the ions travel the 1.4 mm gap; within the
+300 ns simulation window the cathode signal is still rising, having reached roughly
+one-third of its final value.
 
 ### Charge ratio vs source distance
 
@@ -426,29 +449,25 @@ by a factor ~10⁴ before collection.
 
 ### Interaction fraction
 
-Because the 5.9 keV photon mean free path (~3–5 cm in Ar:CO2 at 1 atm) is much longer
-than the 1.4 mm gap, only ~3 % of events produce an interaction.  The remaining ~97 %
-are skipped and do not contribute to histograms.  To increase statistics, increase
-`n_events`; the histograms already contain only interacting events.
+Every event deposits primary electrons at the configured distance, so the interaction
+fraction is always 100 %.  The `n_interacted` and `interaction_fraction` fields in
+`summary.csv` equal `n_events` and 1.0 respectively.
 
 ---
 
 ## Performance notes
 
-| Config                   | Gas generation     | Events/distance | Typical wall time    |
-|--------------------------|--------------------|-----------------|----------------------|
-| Smoke (`smoke_tgc.json`) | ~2 min (if needed) | 10              | ~5 min               |
-| Default (1000 events)    | ~10 min (once)     | 1000            | 1–4 h per distance   |
-| Fast check               | cached             | 50              | ~15 min per distance |
+| Config                   | Gas generation     | Events/distance | Typical wall time  |
+|--------------------------|--------------------|-----------------|---------------------|
+| Smoke (`smoke_tgc.json`) | ~2 min (if needed) | 10              | ~1–2 min            |
+| Default (1000 events)    | ~10 min (once)     | 1000            | ~20–60 min/distance |
 
-The dominant cost is `AvalancheMicroscopic`: each of the ~220 primary electrons runs a
-full microscopic avalanche.  To speed up:
+The dominant cost is one `AvalancheMicroscopic` simulation per event (the result is then
+scaled by N_primary ≈ 227).  To speed up:
 
-* Reduce `n_events` (e.g. 100 for exploratory runs).
+* Reduce `n_events` (e.g. 50 for exploratory runs).
 * Reduce `max_avalanche_size` (e.g. 10 000); this caps gain fluctuations but gives
   faster mean estimates.
-* Use `DriftLineRKF` instead of `AvalancheMicroscopic` for drift-only simulations
-  (no multiplication, much faster).
 * Run multiple `--distance` jobs in parallel on separate cores.
 
 Gas generation (Magboltz) is a one-time cost; the `.gas` file is reused on every
