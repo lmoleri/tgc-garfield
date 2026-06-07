@@ -9,6 +9,7 @@ Launch from anywhere:
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -282,11 +283,23 @@ class ConfigPanel(QScrollArea):
         gas_form.addRow("W-value [eV]",        self.w_value)
         gas_form.addRow("Max e⁻ energy [eV]",  self.max_electron_energy)
         gas_form.addRow("Field points",        self.n_field_pts)
-        gas_form.addRow("E-field max [V/cm]",  self.e_field_max)
+        ef_row = QWidget()
+        ef_h   = QHBoxLayout(ef_row)
+        ef_h.setContentsMargins(0, 0, 0, 0)
+        ef_h.addWidget(self.e_field_max)
+        btn_ef_auto = QPushButton("Auto")
+        btn_ef_auto.setFixedWidth(44)
+        btn_ef_auto.setToolTip(
+            "Set to 2× estimated peak near-wire field (Sauli 1977 formula).\n"
+            "E_peak = V / (r × (ln(pitch/(2π r)) + π gap/pitch))"
+        )
+        btn_ef_auto.clicked.connect(self._on_ef_auto)
+        ef_h.addWidget(btn_ef_auto)
+        gas_form.addRow("E-field max [V/cm]",  ef_row)
         gas_form.addRow("Gas file (auto)",     self.gas_file_label)
         root_layout.addWidget(gas_box)
 
-        # Update gas file label whenever a relevant parameter changes
+        # Update gas file label whenever a gas or geometry parameter changes
         self.temperature.valueChanged.connect(self._update_gas_file_label)
         self.pressure.valueChanged.connect(self._update_gas_file_label)
         self.penning.toggled.connect(self._update_gas_file_label)
@@ -294,6 +307,11 @@ class ConfigPanel(QScrollArea):
         self.max_electron_energy.valueChanged.connect(self._update_gas_file_label)
         self.n_field_pts.valueChanged.connect(self._update_gas_file_label)
         self.e_field_max.valueChanged.connect(self._update_gas_file_label)
+        # Geometry changes affect E_peak shown in the label
+        self.wire_pitch.valueChanged.connect(self._update_gas_file_label)
+        self.wire_diam.valueChanged.connect(self._update_gas_file_label)
+        self.gap_cm.valueChanged.connect(self._update_gas_file_label)
+        self.wire_volts.valueChanged.connect(self._update_gas_file_label)
 
         # ── Simulation ────────────────────────────────────────────────────
         sim_box  = QGroupBox("Simulation")
@@ -301,7 +319,7 @@ class ConfigPanel(QScrollArea):
 
         self.n_events    = self._spin(1, 100000, 1000)
         self.max_aval    = self._spin(1000, 10000000, 500000)
-        self.time_window = self._dspin(10.0, 20000.0, 10.0, 1, 300.0)
+        self.time_window = self._dspin(10.0, 100000.0, 10.0, 1, 300.0)
         self.time_step   = self._dspin(0.1, 10.0, 0.1, 2, 0.5)
         self.enable_ion_drift = QCheckBox()
         self.enable_ion_drift.setChecked(True)
@@ -381,7 +399,34 @@ class ConfigPanel(QScrollArea):
         name = derive_gas_filename(gas)
         exists = (TGC_DIR / name).exists()
         status = "✓ exists" if exists else "will be generated"
-        self.gas_file_label.setText(f"{name}\n[{status}]")
+
+        e_peak_kvcm = self._compute_peak_field_kvcm()
+        e_max_kvcm  = self.e_field_max.value() / 1000.0
+        margin      = e_max_kvcm / e_peak_kvcm if e_peak_kvcm > 0 else float("inf")
+        if e_max_kvcm < e_peak_kvcm:
+            margin_str = " ⚠ below E_peak!"
+        elif margin < 1.5:
+            margin_str = f" (margin {margin:.1f}×)"
+        else:
+            margin_str = ""
+        self.gas_file_label.setText(
+            f"{name}\n[{status}]  E_peak ≈ {e_peak_kvcm:.0f} kV/cm{margin_str}"
+        )
+
+    def _compute_peak_field_kvcm(self) -> float:
+        """Sauli 1977 peak near-wire field estimate [kV/cm]."""
+        r_cm  = self.wire_diam.value() * 0.5e-4          # radius in cm
+        pitch = self.wire_pitch.value()
+        gap   = self.gap_cm.value()
+        volt  = self.wire_volts.value()
+        cap   = math.log(pitch / (2 * math.pi * r_cm)) + math.pi * gap / pitch
+        return volt / (r_cm * cap) / 1000.0               # V/cm → kV/cm
+
+    def _on_ef_auto(self):
+        """Fill e_field_max with 2× E_peak, rounded up to the nearest 50 kV/cm."""
+        e_peak_vcm = self._compute_peak_field_kvcm() * 1000.0
+        auto_val   = math.ceil(2.0 * e_peak_vcm / 50_000.0) * 50_000.0
+        self.e_field_max.setValue(auto_val)
 
     def _update_readout_widgets(self):
         resistive = self.readout_type.currentText() == "Resistive"
@@ -517,23 +562,6 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(self.figure)
 
 
-class Mpl3DCanvas(FigureCanvasQTAgg):
-    """A single matplotlib 3D axes embedded in a Qt widget."""
-
-    def __init__(self, figsize: tuple = (8, 5), parent=None):
-        self.figure = Figure(figsize=figsize)
-        self.ax = self.figure.add_subplot(111, projection="3d")
-        super().__init__(self.figure)
-        self._user_dist = None  # persists user zoom across redraws
-        self.mpl_connect("scroll_event", self._on_scroll)
-
-    def _on_scroll(self, event):
-        if event.inaxes is not self.ax:
-            return
-        self._user_dist = self.ax.dist * (0.9 if event.step > 0 else 1.1)
-        self.ax.dist = self._user_dist
-        self.draw_idle()
-
 
 # ---------------------------------------------------------------------------
 # Results panel (right side)
@@ -571,7 +599,12 @@ class ResultsPanel(QTabWidget):
         self._charge_objects: list = []
         self._track_data:   dict = {}  # label → dict of numpy object arrays
         self._track_geom:   dict | None = None
+        self._tracks_canvas  = None   # ROOT TCanvas for 3D tracks
+        self._tracks_objects: list = []
+        self._trk_view: object = None  # TView3D captured at draw time
         self._efield_cache: dict | None = None   # {x, y, Ex, Ey} computed arrays
+        self._efield_root_canvas  = None   # ROOT TCanvas for E-field maps
+        self._efield_objects: list = []
 
         wave_widget = QWidget()
         wave_layout = QVBoxLayout(wave_widget)
@@ -693,8 +726,43 @@ class ResultsPanel(QTabWidget):
         trk_sel_h.addStretch()
         tracks_layout.addWidget(trk_sel_row)
 
-        self.tracks_canvas = Mpl3DCanvas(figsize=(8, 5))
-        tracks_layout.addWidget(self.tracks_canvas, stretch=1)
+        # — view controls (preset orientations + zoom) —
+        trk_ctrl_row = QWidget()
+        trk_ctrl_h   = QHBoxLayout(trk_ctrl_row)
+        trk_ctrl_h.setContentsMargins(0, 0, 0, 0)
+
+        for _label, _lon, _lat in [
+            ("Gap XY",  90,  0),   # along Y → sees X-Z (track vs wire)
+            ("Top XZ",  90, 90),   # from above → sees X-Y (gap cross-section)
+            ("Side YZ",  0,  0),   # along X → sees Y-Z (gap + drift)
+            ("3D",      30, 30),   # default perspective
+        ]:
+            _btn = QPushButton(_label)
+            _btn.setMaximumWidth(72)
+            _btn.clicked.connect(
+                (lambda lo, la: lambda: self._trk_setview(lo, la))(_lon, _lat))
+            trk_ctrl_h.addWidget(_btn)
+
+        trk_ctrl_h.addSpacing(16)
+        trk_zoom_in_btn  = QPushButton("Zoom +")
+        trk_zoom_out_btn = QPushButton("Zoom −")
+        trk_zoom_in_btn.setMaximumWidth(65)
+        trk_zoom_out_btn.setMaximumWidth(65)
+        trk_zoom_in_btn.clicked.connect(lambda: self._trk_zoom(True))
+        trk_zoom_out_btn.clicked.connect(lambda: self._trk_zoom(False))
+        trk_ctrl_h.addWidget(trk_zoom_in_btn)
+        trk_ctrl_h.addWidget(trk_zoom_out_btn)
+        trk_ctrl_h.addStretch()
+        tracks_layout.addWidget(trk_ctrl_row)
+
+        trk_hint = QLabel(
+            "ROOT canvas opens automatically when results are loaded.\n"
+            "Left-click drag: rotate  ·  Zoom ± / view buttons above  ·  Right-click: save."
+        )
+        trk_hint.setWordWrap(True)
+        trk_hint.setStyleSheet("color: grey; font-size: 11px;")
+        tracks_layout.addWidget(trk_hint)
+        tracks_layout.addStretch()
 
         self.trk_dist_combo.currentIndexChanged.connect(self._on_trk_dist_changed)
         self.trk_event_slider.sliderReleased.connect(self._update_track_plot)
@@ -771,15 +839,36 @@ class ResultsPanel(QTabWidget):
         ctrl_h.addWidget(self.ef_cmap)
         ctrl_h.addSpacing(12)
 
+        ctrl_h.addWidget(QLabel("Grid nx:"))
+        self.ef_nx = QSpinBox()
+        self.ef_nx.setRange(50, 10000)
+        self.ef_nx.setSingleStep(100)
+        self.ef_nx.setValue(250)
+        ctrl_h.addWidget(self.ef_nx)
+        ctrl_h.addSpacing(6)
+        ctrl_h.addWidget(QLabel("ny:"))
+        self.ef_ny = QSpinBox()
+        self.ef_ny.setRange(50, 10000)
+        self.ef_ny.setSingleStep(100)
+        self.ef_ny.setValue(150)
+        ctrl_h.addWidget(self.ef_ny)
+        ctrl_h.addSpacing(12)
+
         ef_compute_btn = QPushButton("Compute")
         ef_compute_btn.clicked.connect(lambda: self._update_efield_plots(recompute=True))
         ctrl_h.addWidget(ef_compute_btn)
         ctrl_h.addStretch()
         efield_layout.addWidget(ctrl_row)
 
-        # — canvas: 3 subplots —
-        self.efield_canvas = MplCanvas(nrows=1, ncols=3, figsize=(13, 4))
-        efield_layout.addWidget(self.efield_canvas, stretch=1)
+        # — hint —
+        ef_hint = QLabel(
+            "ROOT canvas opens automatically when Compute is clicked.\n"
+            "Right-click inside the ROOT window to zoom, change axes, or save."
+        )
+        ef_hint.setWordWrap(True)
+        ef_hint.setStyleSheet("color: grey; font-size: 11px;")
+        efield_layout.addWidget(ef_hint)
+        efield_layout.addStretch()
 
         # Depth spinboxes re-slice without recomputing the field
         self.ef_y_depth.valueChanged.connect(
@@ -878,6 +967,16 @@ class ResultsPanel(QTabWidget):
 
     # ── Waveforms ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _root_canvas_alive(canvas, name: str) -> bool:
+        """Return True if the ROOT TCanvas still exists (not closed by the user)."""
+        try:
+            import ROOT  # noqa: PLC0415
+            return (canvas is not None and
+                    ROOT.gROOT.GetListOfCanvases().FindObject(name) is not None)
+        except Exception:  # noqa: BLE001
+            return False
+
     def _process_root_events(self):
         """Keep the ROOT TCanvas window responsive while Qt runs."""
         try:
@@ -897,6 +996,10 @@ class ResultsPanel(QTabWidget):
         if not Path(root_path).exists():
             self.append_log(f"[GUI] ROOT file not found: {root_path}")
             return
+
+        # Force canvas recreation for the new run
+        self._root_canvas   = None
+        self._charge_canvas = None
 
         self._waveform_data.clear()
         self.wave_dist_combo.blockSignals(True)
@@ -991,6 +1094,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
+            if not self._root_canvas_alive(self._root_canvas, "tgc_waveforms"):
+                self._root_canvas = None
             if self._root_canvas is None:
                 self._root_canvas = ROOT.TCanvas(
                     "tgc_waveforms", "TGC Waveforms", 950, 700
@@ -1077,6 +1182,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
+            if not self._root_canvas_alive(self._charge_canvas, "tgc_charges"):
+                self._charge_canvas = None
             if self._charge_canvas is None:
                 self._charge_canvas = ROOT.TCanvas(
                     "tgc_charges", "TGC Charges", 950, 700
@@ -1131,6 +1238,7 @@ class ResultsPanel(QTabWidget):
 
         self._track_data.clear()
         self._track_geom = None
+        self._tracks_canvas = None   # force recreation for the new run
         self.trk_dist_combo.blockSignals(True)
         self.trk_dist_combo.clear()
 
@@ -1200,6 +1308,7 @@ class ResultsPanel(QTabWidget):
         self.trk_dist_combo.blockSignals(False)
         if self.trk_dist_combo.count():
             self._on_trk_dist_changed(0)
+            self._root_timer.start()   # keep tracks window responsive
 
     def _on_trk_dist_changed(self, index: int):
         label = self.trk_dist_combo.currentText()
@@ -1215,7 +1324,7 @@ class ResultsPanel(QTabWidget):
         self._update_track_plot()
 
     def _update_track_plot(self):
-        """Render detector geometry and per-event tracks in the 3D canvas."""
+        """Render detector geometry and per-event tracks in a ROOT TCanvas."""
         label = self.trk_dist_combo.currentText()
         data  = self._track_data.get(label)
         if data is None:
@@ -1225,97 +1334,147 @@ class ResultsPanel(QTabWidget):
         n  = len(data["primary_x"])
         self.trk_event_label.setText(f"{ev + 1} / {n}")
 
-        ax = self.tracks_canvas.ax
-        ax.cla()
-
-        # ── Geometry ──────────────────────────────────────────────────────────
         geom    = self._track_geom or {}
         pitch   = geom.get("wire_pitch_cm", 0.18)
         n_wires = int(geom.get("n_wires", 10))
         gap     = geom.get("gap_cm", 0.14)
-        z_half  = 0.5   # sensor z extent [cm]
+        z_half  = 0.5
         x_half  = (n_wires - 1) / 2.0 * pitch + pitch
+        x_wires = [(i - (n_wires - 1) / 2.0) * pitch for i in range(n_wires)]
 
-        # Cathode planes as translucent rectangles
         try:
-            from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: PLC0415
-            for y_plane, fc in [(-gap, "cyan"), (+gap, "lightyellow")]:
-                verts = [[
-                    [-x_half, y_plane, -z_half], [ x_half, y_plane, -z_half],
-                    [ x_half, y_plane,  z_half], [-x_half, y_plane,  z_half],
-                ]]
-                poly = Poly3DCollection(verts, alpha=0.13,
-                                        facecolor=fc, edgecolor="grey",
-                                        linewidths=0.5)
-                ax.add_collection3d(poly)
-        except ImportError:
-            pass   # very unlikely — mpl_toolkits ships with matplotlib
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
 
-        # Anode wires (gold lines along z)
-        for i in range(n_wires):
-            xw = (i - (n_wires - 1) / 2.0) * pitch
-            ax.plot([xw, xw], [0.0, 0.0], [-z_half, z_half],
-                    color="gold", lw=1.2, zorder=3)
+            if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
+                self._tracks_canvas = None
+            if self._tracks_canvas is None:
+                self._tracks_canvas = ROOT.TCanvas(
+                    "tgc_tracks", "TGC 3D Tracks", 900, 700)
 
-        # ── Per-event tracks ──────────────────────────────────────────────────
-        # Primary electron drift line (blue)
-        ax.plot(data["primary_x"][ev], data["primary_y"][ev], data["primary_z"][ev],
-                color="royalblue", lw=1.8, label="Primary e⁻", zorder=5)
+            self._trk_view = None   # reset BEFORE Clear so no dangling C++ pointer
+            self._tracks_canvas.cd()
+            self._tracks_canvas.Clear()
+            self._tracks_objects.clear()
 
-        # Avalanche cloud: start positions of secondary electron tracks (orange)
-        cx = data["cloud_x"][ev]
-        cy = data["cloud_y"][ev]
-        cz = data["cloud_z"][ev]
-        if len(cx) > 0:
-            ax.scatter(cx, cy, cz, c="darkorange", s=4, alpha=0.5,
-                       label="Avalanche cloud", zorder=4, depthshade=False)
+            # TH3F frame — defines axes and 3D coordinate range
+            frame = ROOT.TH3F(
+                "trk_frame",
+                f"TGC 3D Tracks — {label}, event {ev + 1};"
+                "x [cm];y [cm];z [cm]",
+                1, -x_half, x_half,
+                1, -gap * 1.2, gap * 1.2,
+                1, -z_half, z_half,
+            )
+            frame.SetStats(0)
+            frame.Draw()
+            self._tracks_objects.append(frame)
 
-        # Ion drift paths, colour-coded by destination cathode
-        ix    = data["ion_x"][ev]
-        iy    = data["ion_y"][ev]
-        iz    = data["ion_z"][ev]
-        inpts = data["ion_npts"][ev]
-        if len(inpts) > 0:
-            splits = np.concatenate([[0], np.cumsum(inpts)])
-            tol    = 0.01 * gap
-            for k in range(len(inpts)):
-                xs = ix[splits[k]:splits[k + 1]]
-                ys = iy[splits[k]:splits[k + 1]]
-                zs = iz[splits[k]:splits[k + 1]]
+            def _pl3(xs, ys, zs, color, width=1):
+                ln = ROOT.TPolyLine3D(
+                    len(xs), xs.astype("f4"), ys.astype("f4"), zs.astype("f4"))
+                ln.SetLineColor(color)
+                ln.SetLineWidth(width)
+                ln.Draw("SAME")
+                self._tracks_objects.append(ln)
+
+            # ── Cathode planes (rectangular outlines) ─────────────────────────
+            for y_cath, color in [(-gap, ROOT.kCyan - 7), (gap, ROOT.kYellow - 7)]:
+                cx = np.array([-x_half, x_half, x_half, -x_half, -x_half], "f4")
+                cy = np.full(5, y_cath, "f4")
+                cz = np.array([-z_half, -z_half, z_half, z_half, -z_half], "f4")
+                pl = ROOT.TPolyLine3D(5, cx, cy, cz)
+                pl.SetLineColor(color)
+                pl.SetLineWidth(2)
+                pl.Draw("SAME")
+                self._tracks_objects.append(pl)
+
+            # ── Anode wires ───────────────────────────────────────────────────
+            for x_w in x_wires:
+                _pl3(np.array([x_w, x_w]), np.zeros(2),
+                     np.array([-z_half, z_half]), ROOT.kYellow + 1, 2)
+
+            # ── Primary electron drift (blue) ─────────────────────────────────
+            px = np.asarray(data["primary_x"][ev])
+            py = np.asarray(data["primary_y"][ev])
+            pz = np.asarray(data["primary_z"][ev])
+            if len(px) >= 2:
+                _pl3(px, py, pz, ROOT.kBlue + 1, 2)
+
+            # ── Avalanche cloud (orange markers) ──────────────────────────────
+            cx_ = np.asarray(data["cloud_x"][ev])
+            cy_ = np.asarray(data["cloud_y"][ev])
+            cz_ = np.asarray(data["cloud_z"][ev])
+            if len(cx_) > 0:
+                p = np.empty(3 * len(cx_), "f4")
+                p[0::3] = cx_; p[1::3] = cy_; p[2::3] = cz_
+                mrk = ROOT.TPolyMarker3D(len(cx_), p, 7)
+                mrk.SetMarkerColor(ROOT.kOrange + 1)
+                mrk.SetMarkerSize(0.4)
+                mrk.Draw("SAME")
+                self._tracks_objects.append(mrk)
+
+            # ── Ion drift paths (colour-coded by destination) ─────────────────
+            ion_x = np.asarray(data["ion_x"][ev])
+            ion_y = np.asarray(data["ion_y"][ev])
+            ion_z = np.asarray(data["ion_z"][ev])
+            inpts = np.asarray(data["ion_npts"][ev])
+            tol   = 0.05 * gap
+            off   = 0
+            for n_seg in inpts:
+                xs = ion_x[off:off + n_seg]
+                ys = ion_y[off:off + n_seg]
+                zs = ion_z[off:off + n_seg]
+                off += n_seg
                 if len(ys) == 0:
                     continue
                 y_end = float(ys[-1])
                 if abs(y_end - (-gap)) <= tol:
-                    color = "limegreen"   # → readout cathode
+                    col = ROOT.kGreen + 2    # → readout cathode
                 elif abs(y_end - gap) <= tol:
-                    color = "magenta"     # → non-readout cathode
+                    col = ROOT.kMagenta      # → non-readout cathode
                 else:
-                    color = "grey"        # absorbed / out of window
-                ax.plot(xs, ys, zs, color=color, lw=0.8, alpha=0.7)
+                    col = ROOT.kGray + 1     # absorbed / out of window
+                _pl3(xs, ys, zs, col, 1)
 
-        # ── Axes / labels / legend ────────────────────────────────────────────
-        ax.set_xlabel("x [cm]", fontsize=8, labelpad=1)
-        ax.set_ylabel("y [cm]", fontsize=8, labelpad=1)
-        ax.set_zlabel("z [cm]", fontsize=8, labelpad=1)
-        ax.set_title(f"{label},  event {ev + 1}", fontsize=9)
-        ax.set_xlim(-x_half,    x_half)
-        ax.set_ylim(-gap * 1.15, gap * 1.15)
-        ax.set_zlim(-z_half,    z_half)
-        ax.tick_params(labelsize=7)
+            self._tracks_canvas.Update()
+            self._trk_view = self._tracks_canvas.GetView()  # TView3D exists after paint
 
-        # Build a compact legend (deduplicate auto-entries, add ion colour proxies)
-        from matplotlib.lines import Line2D  # noqa: PLC0415
-        handles, labs = ax.get_legend_handles_labels()
-        by_label = dict(zip(labs, handles))
-        by_label["Ion → readout"]     = Line2D([0], [0], color="limegreen", lw=1.5)
-        by_label["Ion → non-readout"] = Line2D([0], [0], color="magenta",   lw=1.5)
-        ax.legend(by_label.values(), by_label.keys(),
-                  loc="upper right", fontsize=7, framealpha=0.6)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT 3D tracks error: {exc}")
 
-        if self.tracks_canvas._user_dist is not None:
-            self.tracks_canvas.ax.dist = self.tracks_canvas._user_dist
-        self.tracks_canvas.figure.tight_layout()
-        self.tracks_canvas.draw_idle()
+    def _trk_zoom(self, zoom_in: bool) -> None:
+        """Zoom the ROOT 3D tracks canvas using the stored TView3D reference."""
+        if self._trk_view is None:
+            return
+        if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
+            self._trk_view = None
+            return
+        try:
+            import ROOT  # noqa: PLC0415
+            self._tracks_canvas.cd()    # gPad must equal this canvas for ZoomIn/Out
+            self._trk_view.ZoomIn() if zoom_in else self._trk_view.ZoomOut()
+            # ZoomIn/ZoomOut call gPad.Modified() + gPad.Update() internally
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _trk_setview(self, lon: float, lat: float) -> None:
+        """Snap the ROOT 3D tracks view to a preset orientation."""
+        if self._trk_view is None:
+            return
+        if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
+            self._trk_view = None
+            return
+        try:
+            import ROOT  # noqa: PLC0415
+            from array import array
+            self._tracks_canvas.cd()
+            irep = array('i', [0])      # Int_t & output required by SetView
+            self._trk_view.SetView(lon, lat, 0.0, irep)
+            self._tracks_canvas.Modified()
+            self._tracks_canvas.Update()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── E-Field ────────────────────────────────────────────────────────────────
 
@@ -1367,7 +1526,8 @@ class ResultsPanel(QTabWidget):
             wire_volt = self.ef_wire_volt.value()
             try:
                 x, y, Ex, Ey = self._compute_efield(
-                    gap, pitch, n_wires, diam_um, wire_volt)
+                    gap, pitch, n_wires, diam_um, wire_volt,
+                    nx=self.ef_nx.value(), ny=self.ef_ny.value())
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[GUI] E-field computation error: {exc}")
                 return
@@ -1377,78 +1537,100 @@ class ResultsPanel(QTabWidget):
         elif self._efield_cache is None:
             return  # nothing cached yet
 
-        c      = self._efield_cache
-        x, y   = c["x"], c["y"]
-        Ex, Ey = c["Ex"], c["Ey"]
-        gap    = c["gap"]
-        pitch  = c["pitch"]
+        c       = self._efield_cache
+        x, y    = c["x"], c["y"]
+        Ex, Ey  = c["Ex"], c["Ey"]
+        gap     = c["gap"]
+        pitch   = c["pitch"]
         n_wires = c["n_wires"]
         x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
         x_half  = (n_wires - 1) / 2 * pitch + pitch
-        z_half  = 0.5  # cm
 
         comp = self.ef_component.currentText()
         if   comp == "|E|": field = np.sqrt(Ex ** 2 + Ey ** 2)
         elif comp == "Ex":  field = Ex
         else:               field = Ey
 
-        cmap  = self.ef_cmap.currentText()
-        y0    = self.ef_y_depth.value()
-        x0    = self.ef_x_depth.value()
-        X, Y  = np.meshgrid(x, y)
+        y0 = self.ef_y_depth.value()
+        x0 = self.ef_x_depth.value()
+        iy = int(np.argmin(np.abs(y - y0)))
+        ix = int(np.argmin(np.abs(x - x0)))
+        X, Y = np.meshgrid(x, y)
 
-        axes = self.efield_canvas.axes
-        for ax in axes:
-            ax.cla()
+        try:
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
 
-        # ── subplot 0: XY plane ───────────────────────────────────────────────
-        ax0 = axes[0]
-        im0 = ax0.pcolormesh(X, Y, field, cmap=cmap, shading="auto")
-        self.efield_canvas.figure.colorbar(im0, ax=ax0, label="V/cm")
-        for x_w in x_wires:
-            ax0.plot(x_w, 0, "wx", markersize=5, markeredgewidth=1.5)
-        ax0.axhline( gap, color="grey", lw=1, ls="--")
-        ax0.axhline(-gap, color="grey", lw=1, ls="--")
-        ax0.set_xlabel("x [cm]", fontsize=8)
-        ax0.set_ylabel("y [cm]", fontsize=8)
-        ax0.set_title(f"XY plane — {comp} [V/cm]", fontsize=9)
-        ax0.tick_params(labelsize=7)
+            if not self._root_canvas_alive(self._efield_root_canvas, "tgc_efield"):
+                self._efield_root_canvas = None
+            if self._efield_root_canvas is None:
+                self._efield_root_canvas = ROOT.TCanvas(
+                    "tgc_efield", "TGC E-Field", 1300, 500)
 
-        # ── subplot 1: ZX plane at y = y0 ────────────────────────────────────
-        ax1 = axes[1]
-        iy  = int(np.argmin(np.abs(y - y0)))
-        E_xz = field[iy, :]                            # shape (nx,)
-        z    = np.array([-z_half, z_half])
-        Xg, Zg = np.meshgrid(x, z)
-        E_xz_2d = np.tile(E_xz, (2, 1))               # shape (2, nx)
-        im1 = ax1.pcolormesh(Xg, Zg, E_xz_2d, cmap=cmap, shading="auto",
-                             vmin=field.min(), vmax=field.max())
-        self.efield_canvas.figure.colorbar(im1, ax=ax1, label="V/cm")
-        for x_w in x_wires:
-            ax1.axvline(x_w, color="w", lw=0.5, ls=":")
-        ax1.set_xlabel("x [cm]", fontsize=8)
-        ax1.set_ylabel("z [cm]", fontsize=8)
-        ax1.set_title(f"ZX plane at y = {y[iy]:.3f} cm — {comp}", fontsize=9)
-        ax1.tick_params(labelsize=7)
+            self._efield_root_canvas.Clear()
+            self._efield_root_canvas.Divide(3, 1)
+            self._efield_objects.clear()
 
-        # ── subplot 2: ZY plane at x = x0 ────────────────────────────────────
-        ax2 = axes[2]
-        ix  = int(np.argmin(np.abs(x - x0)))
-        E_zy = field[:, ix]                            # shape (ny,)
-        Zg2, Yg2 = np.meshgrid(z, y)
-        E_zy_2d = np.tile(E_zy[:, None], (1, 2))      # shape (ny, 2)
-        im2 = ax2.pcolormesh(Zg2, Yg2, E_zy_2d, cmap=cmap, shading="auto",
-                             vmin=field.min(), vmax=field.max())
-        self.efield_canvas.figure.colorbar(im2, ax=ax2, label="V/cm")
-        ax2.axhline( gap, color="grey", lw=1, ls="--")
-        ax2.axhline(-gap, color="grey", lw=1, ls="--")
-        ax2.set_xlabel("z [cm]", fontsize=8)
-        ax2.set_ylabel("y [cm]", fontsize=8)
-        ax2.set_title(f"ZY plane at x = {x[ix]:.3f} cm — {comp}", fontsize=9)
-        ax2.tick_params(labelsize=7)
+            # ── Pad 1: XY plane (TH2F COLZ) ──────────────────────────────────
+            self._efield_root_canvas.cd(1)
+            nx_v, ny_v = len(x), len(y)
+            dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
+            dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
+            h2 = ROOT.TH2F(
+                "h_efield",
+                f"XY plane — {comp} [V/cm];x [cm];y [cm]",
+                nx_v, x[0] - dx / 2, x[-1] + dx / 2,
+                ny_v, y[0] - dy / 2, y[-1] + dy / 2,
+            )
+            h2.SetStats(0)
+            h2.FillN(
+                nx_v * ny_v,
+                X.flatten().astype("f8"),
+                Y.flatten().astype("f8"),
+                field.flatten().astype("f8"),
+            )
+            h2.Draw("COLZ")
+            for x_w in x_wires:
+                m = ROOT.TMarker(x_w, 0.0, 5)
+                m.SetMarkerColor(ROOT.kWhite)
+                m.SetMarkerSize(1.5)
+                m.Draw()
+                self._efield_objects.append(m)
+            for y_c in [-gap, gap]:
+                ln = ROOT.TLine(-x_half, y_c, x_half, y_c)
+                ln.SetLineStyle(2)
+                ln.SetLineColor(ROOT.kGray + 1)
+                ln.Draw()
+                self._efield_objects.append(ln)
+            self._efield_objects.append(h2)
 
-        self.efield_canvas.figure.tight_layout()
-        self.efield_canvas.draw_idle()
+            # ── Pad 2: E(x) profile at y = y0 ────────────────────────────────
+            self._efield_root_canvas.cd(2)
+            g_xz = ROOT.TGraph(len(x), x.astype("f8"), field[iy, :].astype("f8"))
+            g_xz.SetTitle(
+                f"{comp} at y = {y[iy]:.3f} cm;x [cm];{comp} [V/cm]")
+            g_xz.SetLineColor(ROOT.kBlue + 1)
+            g_xz.SetLineWidth(2)
+            ROOT.gPad.SetGrid()
+            g_xz.Draw("AL")
+            self._efield_objects.append(g_xz)
+
+            # ── Pad 3: E(y) profile at x = x0 ────────────────────────────────
+            self._efield_root_canvas.cd(3)
+            g_zy = ROOT.TGraph(len(y), y.astype("f8"), field[:, ix].astype("f8"))
+            g_zy.SetTitle(
+                f"{comp} at x = {x[ix]:.3f} cm;y [cm];{comp} [V/cm]")
+            g_zy.SetLineColor(ROOT.kRed + 1)
+            g_zy.SetLineWidth(2)
+            ROOT.gPad.SetGrid()
+            g_zy.Draw("AL")
+            self._efield_objects.append(g_zy)
+
+            self._efield_root_canvas.Update()
+            self._root_timer.start()   # ensure timer is running
+
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT E-field error: {exc}")
 
 
 # ---------------------------------------------------------------------------

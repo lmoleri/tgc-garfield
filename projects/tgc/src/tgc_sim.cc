@@ -189,6 +189,16 @@ std::string DeriveGasFileName(const GasConfig& g) {
 
 void EnsureDirectory(const fs::path& p) { fs::create_directories(p); }
 
+/// Estimate the peak near-wire electric field using the Sauli 1977 capacitance
+/// formula (eq. 2.3): E_peak = V / (r × (ln(pitch/(2π r)) + π gap/pitch)).
+/// Returns V/cm.  Used to sanity-check gas.e_field_max_vcm.
+double ComputePeakFieldVcm(const GeometryConfig& g) {
+  const double rCm = g.wireDiamUm * 0.5e-4;   // wire radius [cm]
+  const double cap = std::log(g.wirePitchCm / (2. * M_PI * rCm))
+                     + M_PI * g.gapCm / g.wirePitchCm;
+  return g.wireVoltageV / (rCm * cap);
+}
+
 template <typename T>
 double Mean(const std::vector<T>& v) {
   if (v.empty()) return 0.;
@@ -1085,7 +1095,8 @@ int main(int argc, char* argv[]) {
               << "  geometry: " << cfg.geometry.nWires << " wires, "
               << cfg.geometry.wirePitchCm * 10. << " mm pitch, "
               << cfg.geometry.wireDiamUm << " μm diameter, "
-              << cfg.geometry.gapCm * 10. << " mm gap\n"
+              << cfg.geometry.gapCm * 10. << " mm gap"
+              << ", E_peak ≈ " << static_cast<int>(ComputePeakFieldVcm(cfg.geometry) / 1000.) << " kV/cm\n"
               << "  voltage : " << cfg.geometry.wireVoltageV << " V (wires), 0 V (cathodes)\n"
               << "  readout : " << cfg.readout.type
               << (cfg.readout.type == "resistive"
@@ -1100,6 +1111,24 @@ int main(int argc, char* argv[]) {
               << "  source  : " << cfg.source.energyKeV << " keV, "
               << cfg.source.distancesMm.size() << " distance point(s)\n"
               << "  events  : " << cfg.simulation.nEvents << " per point\n";
+
+    // Sanity-check gas.e_field_max_vcm against the estimated peak near-wire field.
+    {
+      const double ePeakVcm = ComputePeakFieldVcm(cfg.geometry);
+      if (cfg.gas.eFieldMaxVcm < ePeakVcm) {
+        std::cerr << "  WARNING: gas.e_field_max_vcm ("
+                  << static_cast<int>(cfg.gas.eFieldMaxVcm / 1000.) << " kV/cm) is below"
+                  << " the estimated peak near-wire field ("
+                  << static_cast<int>(ePeakVcm / 1000.) << " kV/cm).\n"
+                  << "  Magboltz will extrapolate — increase e_field_max_vcm.\n";
+      } else if (cfg.gas.eFieldMaxVcm < 1.5 * ePeakVcm) {
+        std::cout << "  Note: e_field_max_vcm is only "
+                  << std::fixed << std::setprecision(1)
+                  << cfg.gas.eFieldMaxVcm / ePeakVcm
+                  << "× E_peak — recommend ≥ 1.5×.\n"
+                  << std::defaultfloat;
+      }
+    }
 
     // Gas is shared across all distance points
     std::cout << "\nSetting up gas...\n";
