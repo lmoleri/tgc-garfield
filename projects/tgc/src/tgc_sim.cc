@@ -9,7 +9,18 @@
 //            the wire plane (signed: positive → readout pad side, y < 0).
 //            N is computed from the photon energy and the gas W-value.
 // Readout  : (1) all wires as a single "anode" channel,
-//            (2) the bottom cathode plane as a "cathode" channel.
+//            (2) the bottom cathode as a "cathode" channel.
+//            Configurable via readout.type:
+//              "conductive" (default) – grounded plane at y = −gap_cm.
+//              "resistive" – infinitely-thin resistive layer (at y = −gap_cm)
+//              on an insulating substrate (Kapton ε_r=3.5 / FR4 ε_r=4.6),
+//              with external conductive pads. No charge spreading is simulated;
+//              the deposited charge remains at its landing point, but the local
+//              surface potential decays to 0 V (grounded edges) with time
+//              constant τ = ε₀ε_r ρ_s L²/(π²d). The Ramo weighting potential is
+//              corrected for the dielectric layer (α = ε_r·gap/(d+ε_r·gap));
+//              the delayed signal (both during drift and after collection) is
+//              computed via ComponentUser::SetDelayedWeightingPotential.
 //
 // Each primary electron is transported by AvalancheMicroscopic.
 // Induced signals are computed via Shockley-Ramo weighting fields.
@@ -43,6 +54,7 @@
 
 #include "Garfield/AvalancheMicroscopic.hh"
 #include "Garfield/ComponentAnalyticField.hh"
+#include "Garfield/ComponentUser.hh"
 #include "Garfield/DriftLineRKF.hh"
 #include "Garfield/FundamentalConstants.hh"
 #include "Garfield/MediumMagboltz.hh"
@@ -55,6 +67,7 @@ namespace {
 
 using Garfield::AvalancheMicroscopic;
 using Garfield::ComponentAnalyticField;
+using Garfield::ComponentUser;
 using Garfield::DriftLineRKF;
 using Garfield::MediumMagboltz;
 using Garfield::Sensor;
@@ -69,6 +82,13 @@ struct GeometryConfig {
   double gapCm          = 0.14;
   int    nWires         = 10;
   double wireVoltageV   = 1900.0;
+};
+
+struct ReadoutConfig {
+  std::string type                    = "conductive"; // "conductive" | "resistive"
+  std::string insulatorMaterial       = "kapton";     // "kapton" | "fr4"
+  double      insulatorThicknessUm    = 100.0;
+  double      surfaceResistivityOhmSq = 500e3;
 };
 
 struct SourceConfig {
@@ -103,6 +123,7 @@ constexpr std::size_t kMaxDispCloudPts = 500;  // avalanche-cloud points saved p
 
 struct Config {
   GeometryConfig   geometry;
+  ReadoutConfig    readout;
   SourceConfig     source;
   GasConfig        gas;
   SimulationConfig simulation;
@@ -118,9 +139,12 @@ struct DistanceSummary {
   double      meanAnodeChargeFC     = 0.;
   double      rmsAnodeChargeFC      = 0.;
   double      semAnodeChargeFC      = 0.;
-  double      meanCathodeChargeFC   = 0.;
-  double      rmsCathodeChargeFC    = 0.;
-  double      semCathodeChargeFC    = 0.;
+  double      meanCathodeChargeFC      = 0.;
+  double      rmsCathodeChargeFC       = 0.;
+  double      semCathodeChargeFC       = 0.;
+  double      meanCathodeTopChargeFC   = 0.;
+  double      rmsCathodeTopChargeFC    = 0.;
+  double      semCathodeTopChargeFC    = 0.;
   double      meanChargeRatio       = 0.;
   double      rmsChargeRatio        = 0.;
   double      semChargeRatio        = 0.;
@@ -237,6 +261,14 @@ bool ReadBool(const json& obj, std::string_view sec, std::string_view key, bool 
   return v->get<bool>();
 }
 
+std::string ReadString(const json& obj, std::string_view sec, std::string_view key,
+                       const std::string& fb) {
+  auto* v = FindMember(obj, key, {sec, key});
+  if (!v) return fb;
+  if (!v->is_string()) ThrowJsonTypeError({sec, key}, "a string");
+  return v->get<std::string>();
+}
+
 std::vector<double> ReadDoubleArray(const json& obj, std::string_view sec, std::string_view key,
                                     const std::vector<double>& fb) {
   auto* v = FindMember(obj, key, {sec, key});
@@ -325,6 +357,16 @@ Config LoadConfig(const fs::path& path) {
     cfg.geometry.wireVoltageV = ReadDouble(*g, "geometry", "wire_voltage_V",  cfg.geometry.wireVoltageV);
   }
 
+  if (const auto* r = FindSection(root, "readout")) {
+    cfg.readout.type = ReadString(*r, "readout", "type", cfg.readout.type);
+    cfg.readout.insulatorMaterial = ReadString(*r, "readout", "insulator_material",
+                                               cfg.readout.insulatorMaterial);
+    cfg.readout.insulatorThicknessUm    = ReadDouble(*r, "readout", "insulator_thickness_um",
+                                                      cfg.readout.insulatorThicknessUm);
+    cfg.readout.surfaceResistivityOhmSq = ReadDouble(*r, "readout", "surface_resistivity_ohm_sq",
+                                                      cfg.readout.surfaceResistivityOhmSq);
+  }
+
   if (const auto* s = FindSection(root, "source")) {
     cfg.source.energyKeV    = ReadDouble(*s, "source", "energy_keV", cfg.source.energyKeV);
     cfg.source.distancesMm  = ReadDoubleArray(*s, "source", "source_distances_mm", cfg.source.distancesMm);
@@ -353,6 +395,17 @@ Config LoadConfig(const fs::path& path) {
     cfg.simulation.timeStepNs       = ReadDouble(*s, "simulation", "time_step_ns",       cfg.simulation.timeStepNs);
     cfg.simulation.enableIonDrift   = ReadBool  (*s, "simulation", "enable_ion_drift",   cfg.simulation.enableIonDrift);
     cfg.simulation.storeDriftLines  = ReadBool  (*s, "simulation", "store_drift_lines",  cfg.simulation.storeDriftLines);
+  }
+
+  if (cfg.readout.type != "conductive" && cfg.readout.type != "resistive")
+    throw std::runtime_error("readout.type must be 'conductive' or 'resistive'");
+  if (cfg.readout.type == "resistive") {
+    if (cfg.readout.insulatorMaterial != "kapton" && cfg.readout.insulatorMaterial != "fr4")
+      throw std::runtime_error("readout.insulator_material must be 'kapton' or 'fr4'");
+    if (cfg.readout.insulatorThicknessUm <= 0.)
+      throw std::runtime_error("readout.insulator_thickness_um must be positive");
+    if (cfg.readout.surfaceResistivityOhmSq <= 0.)
+      throw std::runtime_error("readout.surface_resistivity_ohm_sq must be positive");
   }
 
   if (cfg.geometry.wirePitchCm <= 0.)  throw std::runtime_error("geometry.wire_pitch_cm must be positive");
@@ -452,13 +505,80 @@ void BuildGeometry(ComponentAnalyticField& cmp, MediumMagboltz& gas,
   }
 }
 
-void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp, const Config& cfg) {
+void SetupResistiveReadout(ComponentUser& cmp,
+                           const ReadoutConfig& ro, const GeometryConfig& geom,
+                           const SimulationConfig& sim) {
+  const double epsR   = (ro.insulatorMaterial == "fr4") ? 4.6 : 3.5;
+  const double dInsCm = ro.insulatorThicknessUm * 1e-4;        // μm → cm
+  const double alpha  = epsR * geom.gapCm / (dInsCm + epsR * geom.gapCm);
+
+  // τ = ε₀ ε_r ρ_s L² / (π² d_ins),  L = half wire-array width [m]
+  const double eps0SI = 8.854e-12;                              // F/m
+  const double dInsM  = ro.insulatorThicknessUm * 1e-6;        // μm → m
+  const double L_m    = geom.nWires * geom.wirePitchCm * 0.5e-2; // cm → m
+  const double tauNs  = eps0SI * epsR * ro.surfaceResistivityOhmSq
+                        * (L_m * L_m) / (M_PI * M_PI * dInsM) * 1e9;
+
+  const double gap = geom.gapCm;
+
+  // Static weighting potential: W_s(y) = α (y + gap) / gap
+  cmp.SetWeightingPotential(
+      [alpha, gap](const double, const double y, const double) {
+        return alpha * (y + gap) / gap;
+      }, "cathode");
+
+  // Static weighting field: E_w = −α/gap ŷ (uniform in y)
+  cmp.SetWeightingField(
+      [alpha, gap](const double, const double, const double,
+                   double& wx, double& wy, double& wz) {
+        wx = wz = 0.;
+        wy = -alpha / gap;
+      }, "cathode");
+
+  // Delayed weighting potential: W_d(y,t) = W_s(y) × (exp(−t/τ) − 1)
+  // Total W = W_s + W_d = W_s × exp(−t/τ) → decays to 0 as surface potential
+  // at landing point is pulled to ground by the resistive sheet.
+  cmp.SetDelayedWeightingPotential(
+      [alpha, gap, tauNs](const double, const double y, const double,
+                          const double t) {
+        return alpha * (y + gap) / gap * (std::exp(-t / tauNs) - 1.0);
+      }, "cathode");
+
+  // Delayed weighting field: E_wd = −dW_d/dy = (α/gap)(1 − exp(−t/τ)) ŷ
+  cmp.SetDelayedWeightingField(
+      [alpha, gap, tauNs](const double, const double, const double,
+                          const double t,
+                          double& wx, double& wy, double& wz) {
+        wx = wz = 0.;
+        wy = -alpha / gap * (std::exp(-t / tauNs) - 1.0);
+      }, "cathode");
+
+  // Sample delayed signal over max(5τ, full time window), 200 points
+  const double maxDelayNs = std::max(5.0 * tauNs, sim.timeWindowNs);
+  constexpr std::size_t nDelayPts = 200;
+  std::vector<double> dtimes(nDelayPts);
+  for (std::size_t i = 0; i < nDelayPts; ++i)
+    dtimes[i] = (i + 1) * maxDelayNs / nDelayPts;
+  cmp.SetDelayedSignalTimes(dtimes);
+
+  std::cout << "  Resistive readout: α = " << alpha
+            << ", τ = " << tauNs << " ns\n";
+}
+
+void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
+                 ComponentUser* cmpReadout, const Config& cfg) {
   const auto& geom = cfg.geometry;
   const auto& sim  = cfg.simulation;
 
   sensor.AddComponent(&cmp);
-  sensor.AddElectrode(&cmp, "anode");    // all wires together
-  sensor.AddElectrode(&cmp, "cathode");  // bottom cathode plane
+  sensor.AddElectrode(&cmp, "anode");       // all wires together
+  // For resistive readout, use a ComponentUser with the dielectric-corrected
+  // (and time-delayed) weighting potential for the cathode electrode.
+  sensor.AddElectrode(cmpReadout ? static_cast<Garfield::Component*>(cmpReadout)
+                                 : static_cast<Garfield::Component*>(&cmp),
+                      "cathode");           // bottom cathode plane (readout)
+  sensor.AddElectrode(&cmp, "cathode_top"); // top cathode plane (Ramo cross-check)
+  if (cmpReadout) sensor.EnableDelayedSignal();
 
   const std::size_t nBins =
       static_cast<std::size_t>(std::round(sim.timeWindowNs / sim.timeStepNs));
@@ -503,17 +623,23 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   TH1D hAvalSize("h_avalanche_size",
                  "Total avalanche size;N_{e,total};Events", 200, 0., 0.);
 
+  TH1D hCathodeTopQ("h_cathode_top_charge",
+                   "Induced charge on cathode_top;Q_{cathode\_top} [fC];Events", 200, 0., 0.);
+
   TProfile pAnodeSignal("p_anode_signal",
                         "Mean anode signal;t [ns];#LTi_{anode}#GT [fC/ns]",
                         static_cast<int>(nBins), 0., sim.timeWindowNs);
   TProfile pCathodeSignal("p_cathode_signal",
                           "Mean cathode signal;t [ns];#LTi_{cathode}#GT [fC/ns]",
                           static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pCathodeTopSignal("p_cathode_top_signal",
+                             "Mean cathode_top signal;t [ns];#LTi_{cathode\_top}#GT [fC/ns]",
+                             static_cast<int>(nBins), 0., sim.timeWindowNs);
 
   for (TH1* h : std::initializer_list<TH1*>{
-           &hAnodeQ, &hCathodeQ, &hRatio,
+           &hAnodeQ, &hCathodeQ, &hCathodeTopQ, &hRatio,
            &hNprimary, &hAvalSize,
-           &pAnodeSignal, &pCathodeSignal}) {
+           &pAnodeSignal, &pCathodeSignal, &pCathodeTopSignal}) {
     h->SetDirectory(nullptr);
   }
 
@@ -568,10 +694,11 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   if (sim.enableIonDrift) ionDrift.emplace(&sensor);
 
   // ── Accumulators for summary statistics ──────────────────────────────────────
-  std::vector<double> anodeCharges, cathodeCharges, chargeRatios;
+  std::vector<double> anodeCharges, cathodeCharges, cathodeTopCharges, chargeRatios;
   std::vector<double> primaryCounts, avalancheSizes;
   anodeCharges.reserve(sim.nEvents);
   cathodeCharges.reserve(sim.nEvents);
+  cathodeTopCharges.reserve(sim.nEvents);
 
   std::size_t nInteracted = 0;
   const std::size_t progressStep = std::max<std::size_t>(1, sim.nEvents / 10);
@@ -690,21 +817,25 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     // accumulator that AvalancheMicroscopic does not populate (it only calls
     // AddSignal into the time-binned arrays), so GetInducedCharge always returns
     // zero here.  The manual integral below is the correct approach.
-    double rawAnode = 0., rawCathode = 0.;
+    double rawAnode = 0., rawCathode = 0., rawCathodeTop = 0.;
     for (std::size_t k = 0; k < nBins; ++k) {
-      const double sigA = sensor.GetSignal("anode",   k);
-      const double sigC = sensor.GetSignal("cathode", k);
-      rawAnode   += sigA;
-      rawCathode += sigC;
+      const double sigA = sensor.GetSignal("anode",       k);
+      const double sigC = sensor.GetSignal("cathode",     k);
+      const double sigT = sensor.GetSignal("cathode_top", k);
+      rawAnode      += sigA;
+      rawCathode    += sigC;
+      rawCathodeTop += sigT;
       const double t = (static_cast<double>(k) + 0.5) * sim.timeStepNs;
-      pAnodeSignal.Fill(t,   sigA * nPrimary);
-      pCathodeSignal.Fill(t, sigC * nPrimary);
+      pAnodeSignal.Fill(t,      sigA * nPrimary);
+      pCathodeSignal.Fill(t,    sigC * nPrimary);
+      pCathodeTopSignal.Fill(t, sigT * nPrimary);
       anodeSig[k]   = static_cast<float>(sigA * nPrimary);
       cathodeSig[k] = static_cast<float>(sigC * nPrimary);
     }
 
-    const double qAnode   = -rawAnode   * sim.timeStepNs * nPrimary; // [fC]
-    const double qCathode =  rawCathode * sim.timeStepNs * nPrimary; // [fC]
+    const double qAnode      = -rawAnode      * sim.timeStepNs * nPrimary; // [fC]
+    const double qCathode    =  rawCathode    * sim.timeStepNs * nPrimary; // [fC]
+    const double qCathodeTop =  rawCathodeTop * sim.timeStepNs * nPrimary; // [fC]
 
     evtId = static_cast<int>(ev);
     evtQa = static_cast<float>(qAnode);
@@ -713,8 +844,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
     hAnodeQ.Fill(qAnode);
     hCathodeQ.Fill(qCathode);
+    hCathodeTopQ.Fill(qCathodeTop);
     anodeCharges.push_back(qAnode);
     cathodeCharges.push_back(qCathode);
+    cathodeTopCharges.push_back(qCathodeTop);
 
     if (qAnode > 0.) {
       const double ratio = qCathode / qAnode;
@@ -734,11 +867,13 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     distDir->cd();
     hAnodeQ.Write("h_anode_charge");
     hCathodeQ.Write("h_cathode_charge");
+    hCathodeTopQ.Write("h_cathode_top_charge");
     hRatio.Write("h_ratio_charge");
     hNprimary.Write("h_n_primary_electrons");
     hAvalSize.Write("h_avalanche_size");
     pAnodeSignal.Write("p_anode_signal");
     pCathodeSignal.Write("p_cathode_signal");
+    pCathodeTopSignal.Write("p_cathode_top_signal");
     signalTree.Write("t_signals");
   }
 
@@ -759,6 +894,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   s.rmsCathodeChargeFC  = Rms(cathodeCharges, s.meanCathodeChargeFC);
   s.semCathodeChargeFC  = Sem(s.rmsCathodeChargeFC, cathodeCharges.size());
 
+  s.meanCathodeTopChargeFC = Mean(cathodeTopCharges);
+  s.rmsCathodeTopChargeFC  = Rms(cathodeTopCharges, s.meanCathodeTopChargeFC);
+  s.semCathodeTopChargeFC  = Sem(s.rmsCathodeTopChargeFC, cathodeTopCharges.size());
+
   s.meanChargeRatio     = Mean(chargeRatios);
   s.rmsChargeRatio      = Rms(chargeRatios, s.meanChargeRatio);
   s.semChargeRatio      = Sem(s.rmsChargeRatio, chargeRatios.size());
@@ -776,13 +915,14 @@ void WriteSummaryGraphs(const std::vector<DistanceSummary>& sums,
   if (sums.empty()) return;
   const std::size_t n = sums.size();
   std::vector<double> x(n), xe(n, 0.);
-  std::vector<double> qa(n), qaE(n), qc(n), qcE(n), rat(n), ratE(n);
+  std::vector<double> qa(n), qaE(n), qc(n), qcE(n), qt(n), qtE(n), rat(n), ratE(n);
 
   for (std::size_t i = 0; i < n; ++i) {
     x[i]    = sums[i].distanceMm;
-    qa[i]   = sums[i].meanAnodeChargeFC;   qaE[i]  = sums[i].semAnodeChargeFC;
-    qc[i]   = sums[i].meanCathodeChargeFC; qcE[i]  = sums[i].semCathodeChargeFC;
-    rat[i]  = sums[i].meanChargeRatio;     ratE[i] = sums[i].semChargeRatio;
+    qa[i]   = sums[i].meanAnodeChargeFC;      qaE[i]  = sums[i].semAnodeChargeFC;
+    qc[i]   = sums[i].meanCathodeChargeFC;    qcE[i]  = sums[i].semCathodeChargeFC;
+    qt[i]   = sums[i].meanCathodeTopChargeFC; qtE[i]  = sums[i].semCathodeTopChargeFC;
+    rat[i]  = sums[i].meanChargeRatio;        ratE[i] = sums[i].semChargeRatio;
   }
 
   auto MakeGraph = [&](const char* name, const char* title,
@@ -797,18 +937,22 @@ void WriteSummaryGraphs(const std::vector<DistanceSummary>& sums,
     return g;
   };
 
-  auto gAnode   = MakeGraph("g_anode_charge",
+  auto gAnode      = MakeGraph("g_anode_charge",
     "Mean anode charge;Source distance from wire plane [mm];Q_{anode} [fC]", qa, qaE, 20);
-  auto gCathode = MakeGraph("g_cathode_charge",
+  auto gCathode    = MakeGraph("g_cathode_charge",
     "Mean cathode charge;Source distance from wire plane [mm];Q_{cathode} [fC]", qc, qcE, 21);
-  auto gRatio   = MakeGraph("g_charge_ratio",
-    "Charge ratio;Source distance from wire plane [mm];Q_{cathode}/Q_{anode}", rat, ratE, 22);
+  auto gCathodeTop = MakeGraph("g_cathode_top_charge",
+    "Mean cathode_top charge;Source distance from wire plane [mm];Q_{cathode\_top} [fC]",
+    qt, qtE, 22);
+  auto gRatio      = MakeGraph("g_charge_ratio",
+    "Charge ratio;Source distance from wire plane [mm];Q_{cathode}/Q_{anode}", rat, ratE, 23);
 
-  TCanvas canvas("c_tgc_summary", "TGC summary", 1800, 500);
-  canvas.Divide(3, 1);
+  TCanvas canvas("c_tgc_summary", "TGC summary", 2400, 500);
+  canvas.Divide(4, 1);
   canvas.cd(1); gAnode.Draw("APL");
   canvas.cd(2); gCathode.Draw("APL");
-  canvas.cd(3); gRatio.Draw("APL");
+  canvas.cd(3); gCathodeTop.Draw("APL");
+  canvas.cd(4); gRatio.Draw("APL");
   EnsureDirectory(pngPath.parent_path());
   canvas.SaveAs(pngPath.string().c_str());
 }
@@ -822,26 +966,30 @@ void WriteSummaryCsv(const fs::path& path, const std::vector<DistanceSummary>& s
   f << "source_distance_mm,n_events,n_interacted,interaction_fraction,"
        "mean_anode_charge_fC,rms_anode_charge_fC,sem_anode_charge_fC,"
        "mean_cathode_charge_fC,rms_cathode_charge_fC,sem_cathode_charge_fC,"
+       "mean_cathode_top_charge_fC,rms_cathode_top_charge_fC,sem_cathode_top_charge_fC,"
        "mean_charge_ratio,rms_charge_ratio,sem_charge_ratio,"
        "mean_primary_electrons,mean_avalanche_size\n";
 
   f << std::fixed << std::setprecision(6);
   for (const auto& s : sums) {
-    f << s.distanceMm         << ','
-      << s.nEvents            << ','
-      << s.nInteracted        << ','
-      << s.interactionFraction<< ','
-      << s.meanAnodeChargeFC  << ','
-      << s.rmsAnodeChargeFC   << ','
-      << s.semAnodeChargeFC   << ','
-      << s.meanCathodeChargeFC<< ','
-      << s.rmsCathodeChargeFC << ','
-      << s.semCathodeChargeFC << ','
-      << s.meanChargeRatio    << ','
-      << s.rmsChargeRatio     << ','
-      << s.semChargeRatio     << ','
-      << s.meanPrimaryElectrons << ','
-      << s.meanAvalancheSize  << '\n';
+    f << s.distanceMm                << ','
+      << s.nEvents                   << ','
+      << s.nInteracted               << ','
+      << s.interactionFraction       << ','
+      << s.meanAnodeChargeFC         << ','
+      << s.rmsAnodeChargeFC          << ','
+      << s.semAnodeChargeFC          << ','
+      << s.meanCathodeChargeFC       << ','
+      << s.rmsCathodeChargeFC        << ','
+      << s.semCathodeChargeFC        << ','
+      << s.meanCathodeTopChargeFC    << ','
+      << s.rmsCathodeTopChargeFC     << ','
+      << s.semCathodeTopChargeFC     << ','
+      << s.meanChargeRatio           << ','
+      << s.rmsChargeRatio            << ','
+      << s.semChargeRatio            << ','
+      << s.meanPrimaryElectrons      << ','
+      << s.meanAvalancheSize         << '\n';
   }
 }
 
@@ -862,6 +1010,12 @@ json ConfigToJson(const Config& cfg) {
       {"gap_cm",           cfg.geometry.gapCm},
       {"n_wires",          cfg.geometry.nWires},
       {"wire_voltage_V",   cfg.geometry.wireVoltageV}
+    }},
+    {"readout", {
+      {"type",                      cfg.readout.type},
+      {"insulator_material",        cfg.readout.insulatorMaterial},
+      {"insulator_thickness_um",    cfg.readout.insulatorThicknessUm},
+      {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq}
     }},
     {"source", jSrc},
     {"gas", {
@@ -925,6 +1079,13 @@ int main(int argc, char* argv[]) {
               << cfg.geometry.wireDiamUm << " μm diameter, "
               << cfg.geometry.gapCm * 10. << " mm gap\n"
               << "  voltage : " << cfg.geometry.wireVoltageV << " V (wires), 0 V (cathodes)\n"
+              << "  readout : " << cfg.readout.type
+              << (cfg.readout.type == "resistive"
+                    ? (" (" + cfg.readout.insulatorMaterial
+                       + ", " + std::to_string(static_cast<int>(cfg.readout.insulatorThicknessUm)) + " μm"
+                       + ", " + std::to_string(static_cast<int>(cfg.readout.surfaceResistivityOhmSq / 1000)) + " kΩ/sq)")
+                    : std::string())
+              << "\n"
               << "  gas     : Ar:CO2 70:30, " << cfg.gas.temperatureK << " K, "
               << cfg.gas.pressureTorr << " Torr\n"
               << "  source  : " << cfg.source.energyKeV << " keV, "
@@ -937,11 +1098,19 @@ int main(int argc, char* argv[]) {
     SetupGas(gas, cfg.gas);
 
     // Geometry and sensor are shared across all distance points
+    ComponentUser cmpReadout;
+    if (cfg.readout.type == "resistive") {
+      std::cout << "\nSetting up resistive readout...\n";
+      SetupResistiveReadout(cmpReadout, cfg.readout, cfg.geometry, cfg.simulation);
+    }
+
     ComponentAnalyticField cmp;
     BuildGeometry(cmp, gas, cfg.geometry);
 
     Sensor sensor;
-    SetupSensor(sensor, cmp, cfg);
+    SetupSensor(sensor, cmp,
+                cfg.readout.type == "resistive" ? &cmpReadout : nullptr,
+                cfg);
 
     // ROOT output
     TFile rootFile((runDir / "tgc_sim.root").string().c_str(), "RECREATE");
@@ -962,11 +1131,18 @@ int main(int argc, char* argv[]) {
       DistanceSummary summary = RunDistancePoint(cfg, distMm, sensor, distDir);
       allSummaries.push_back(summary);
 
-      std::cout << "  ⟨Q_anode⟩   = " << FormatNumber(summary.meanAnodeChargeFC)   << " fC"
-                << "  ±" << FormatNumber(summary.semAnodeChargeFC)   << " (SEM)\n"
-                << "  ⟨Q_cathode⟩ = " << FormatNumber(summary.meanCathodeChargeFC) << " fC"
-                << "  ±" << FormatNumber(summary.semCathodeChargeFC) << " (SEM)\n"
-                << "  ⟨ratio⟩     = " << FormatNumber(summary.meanChargeRatio)     << "\n"
+      std::cout << "  ⟨Q_anode⟩       = " << FormatNumber(summary.meanAnodeChargeFC)      << " fC"
+                << "  ±" << FormatNumber(summary.semAnodeChargeFC)      << " (SEM)\n"
+                << "  ⟨Q_cathode⟩     = " << FormatNumber(summary.meanCathodeChargeFC)   << " fC"
+                << "  ±" << FormatNumber(summary.semCathodeChargeFC)    << " (SEM)\n"
+                << "  ⟨Q_cathode_top⟩ = " << FormatNumber(summary.meanCathodeTopChargeFC) << " fC"
+                << "  ±" << FormatNumber(summary.semCathodeTopChargeFC) << " (SEM)\n"
+                << "  Ramo check: |Q_anode| = "
+                << FormatNumber(std::abs(summary.meanAnodeChargeFC))
+                << "  |Q_cathode|+|Q_top| = "
+                << FormatNumber(std::abs(summary.meanCathodeChargeFC)
+                                + std::abs(summary.meanCathodeTopChargeFC)) << " fC\n"
+                << "  ⟨ratio⟩         = " << FormatNumber(summary.meanChargeRatio) << "\n"
                 << "  interaction fraction: "
                 << FormatNumber(summary.interactionFraction * 100., 2) << "%\n"
                 << "  ⟨avalanche size⟩: "

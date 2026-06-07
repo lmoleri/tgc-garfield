@@ -51,6 +51,23 @@ gradient that enables high gas gain at modest applied voltages.
   −d mm → cathode_top side  (y = +d/10 cm)
 ```
 
+### Resistive readout option
+
+When `readout.type = "resistive"`, the bottom cathode plane is replaced by a
+layered structure.  The gas boundary condition is unchanged (the resistive layer
+acts as a grounded conductor for DC fields), but the Ramo weighting potential
+and the cathode signal shape are modified.
+
+```
+  y = −gap     ─── resistive layer (infinitely thin, ρ_s [Ω/sq]) ───
+               ███████  insulator (Kapton/FR4, thickness d)  ███████
+  y = −gap−d   ────────────── conductive readout pads ──────────────
+```
+
+The resistive layer is grounded at its four edges.  Deposited charge remains at
+its landing point but the local surface potential decays with time constant
+τ = ε₀ ε_r ρ_s L²/(π² d), where L = nWires × wirePitch / 2.
+
 | Parameter         | Value        | Notes                               |
 |-------------------|--------------|-------------------------------------|
 | Wire count        | 10           |                                     |
@@ -148,6 +165,39 @@ Two readout channels are defined:
 * **`anode`** — all 10 wires share this label; their weighting fields are summed
   automatically by `Sensor`.
 * **`cathode`** — the bottom cathode plane at y = −1.4 mm.
+
+#### Conductive mode (default)
+
+Standard Ramo induction: the cathode weighting potential is computed by
+`ComponentAnalyticField` (1 V on the cathode plane, 0 V on wires and top).
+
+#### Resistive mode
+
+Two corrections apply when `readout.type = "resistive"`:
+
+1. **Dielectric attenuation** — the conductive pad sits behind an insulating
+   substrate of permittivity ε_r and thickness d.  The 1-D Poisson solution
+   gives a reduced weighting potential in the gas:
+
+   > W(y) = α (y + gap) / gap,   α = ε_r · gap / (d + ε_r · gap)
+
+   For Kapton (ε_r = 3.5) with d = 100 μm and gap = 1.4 mm, α ≈ 0.98.
+
+2. **Delayed signal** — the deposited surface charge remains at its landing
+   point but the grounded edges pull the local resistive-layer potential toward
+   0 V with time constant τ = ε₀ ε_r ρ_s L²/(π² d).  This causes the
+   weighting potential to decay as W(y,t) = W(y) · exp(−t/τ), which contributes
+   a time-distributed signal on two timescales:
+   - *During drift in the gas*: the time-varying weighting potential modifies
+     how much each drifting charge induces on the pad at each moment.
+   - *After collection*: the fixed surface charge couples to the pad through a
+     decaying potential (exponential tail with characteristic time τ).
+
+   Both contributions are computed automatically by Garfield++'s
+   `ComponentUser::SetDelayedWeightingPotential` framework and are included in
+   `sensor.GetSignal("cathode", k)` once `sensor.EnableDelayedSignal()` is active.
+   The τ printed to stdout at startup can be used to set `time_window_ns` long
+   enough to capture the desired fraction of the delayed charge.
 
 ---
 
@@ -278,6 +328,11 @@ been built yet, the window opens with a warning in the title bar.
 │    Gap [cm]          0.14      │                                         │
 │    N wires           10        │                                         │
 │    Wire voltage [V]  1900      │                                         │
+│  ▼ Readout                     │                                         │
+│    Type        [Conductive ▼]  │                                         │
+│    (Insulator  [Kapton ▼])     │                                         │
+│    (Thickness  100 μm)         │                                         │
+│    (Resistivity 500 kΩ/sq)     │                                         │
 │  ▼ Source                      │                                         │
 │    Energy [keV]      5.9       │                                         │
 │    Distances [mm]  0.2,0.5,…  │                                         │
@@ -324,6 +379,15 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `gap_cm`           | float | cm   | 0.14    | Distance from the wire plane to **each** cathode (the geometry is symmetric: both gaps equal this value). Increasing the gap reduces the average drift field, lowering gain |
 | `n_wires`          | int   | —    | 10      | Number of anode wires in the simulation cell. More wires increase the sensitive area but do not change single-wire physics |
 | `wire_voltage_V`   | float | V    | 1900.0  | High voltage applied to all anode wires (cathodes grounded). Primary handle for tuning gas gain; a ~100 V change shifts gain by roughly one order of magnitude |
+
+### `readout`
+
+| Key                            | Type   | Unit  | Default         | Description |
+|--------------------------------|--------|-------|-----------------|-------------|
+| `type`                         | string | —     | `"conductive"`  | Cathode readout model. `"conductive"`: standard grounded plane (Ramo theorem only). `"resistive"`: adds insulating substrate and resistive layer — see Physics section |
+| `insulator_material`           | string | —     | `"kapton"`      | Insulating substrate material. Sets the relative permittivity used for the dielectric correction and τ calculation. `"kapton"` → ε_r = 3.5; `"fr4"` → ε_r = 4.6. Ignored when `type = "conductive"` |
+| `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
+| `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
 
 ### `source`
 
@@ -438,6 +502,12 @@ wire plane toward the readout cathode, the cathode weighting potential rises mon
 The full induction extends over ~5–8 μs as the ions travel the 1.4 mm gap; within the
 300 ns simulation window the cathode signal is still rising, having reached roughly
 one-third of its final value.
+
+In **resistive mode**, the cathode waveform includes both the prompt component
+(from charge drifting in the gas, attenuated by factor α) and the delayed
+component (exponential tail from the decaying surface potential).  The delayed
+tail has characteristic time τ printed to stdout at startup; set
+`time_window_ns` ≥ 5τ to capture most of the delayed charge.
 
 ### Charge ratio vs source distance
 

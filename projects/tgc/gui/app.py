@@ -186,6 +186,31 @@ class ConfigPanel(QScrollArea):
         geo_form.addRow("Wire voltage [V]",   self.wire_volts)
         root_layout.addWidget(geo_box)
 
+        # ── Readout ───────────────────────────────────────────────────────
+        ro_box  = QGroupBox("Readout")
+        ro_form = QFormLayout(ro_box)
+
+        self.readout_type = QComboBox()
+        self.readout_type.addItems(["Conductive", "Resistive"])
+
+        self.insulator_material = QComboBox()
+        self.insulator_material.addItems(["Kapton", "FR4"])
+
+        self.insulator_thickness = self._dspin(1.0, 10000.0, 10.0, 1, 100.0)
+        self.insulator_thickness.setToolTip("Insulating substrate thickness [μm]")
+
+        self.surface_resistivity = self._dspin(1.0, 1e7, 100.0, 1, 500.0)
+        self.surface_resistivity.setToolTip("Resistive layer surface resistivity [kΩ/sq]")
+
+        ro_form.addRow("Type",                   self.readout_type)
+        ro_form.addRow("Insulator material",     self.insulator_material)
+        ro_form.addRow("Thickness [μm]",         self.insulator_thickness)
+        ro_form.addRow("Resistivity [kΩ/sq]",    self.surface_resistivity)
+        root_layout.addWidget(ro_box)
+
+        self._update_readout_widgets()
+        self.readout_type.currentIndexChanged.connect(self._update_readout_widgets)
+
         # ── Source ────────────────────────────────────────────────────────
         src_box  = QGroupBox("Source")
         src_form = QFormLayout(src_box)
@@ -221,12 +246,21 @@ class ConfigPanel(QScrollArea):
         self.w_value = self._dspin(10.0, 100.0, 0.5, 1, 26.0)
         self.w_value.setToolTip("Effective ionisation energy W [eV per ion pair] for primary electron count")
 
-        # Hidden state for gas parameters not shown in the UI
-        self._hidden_gas = {
-            "max_electron_energy_eV": 2000.0,
-            "n_field_points": 20,
-            "e_field_max_vcm": 300000.0,
-        }
+        self.max_electron_energy = self._dspin(100.0, 100_000.0, 100.0, 0, 2000.0)
+        self.max_electron_energy.setToolTip(
+            "Upper electron energy for Magboltz cross-section table [eV].\n"
+            "Must exceed peak electron energy near the wire (~500–1000 eV)."
+        )
+        self.n_field_pts = self._spin(5, 500, 20)
+        self.n_field_pts.setToolTip(
+            "Number of log-spaced E-field points for the Magboltz transport table.\n"
+            "More points → smoother interpolation; fewer → faster gas generation."
+        )
+        self.e_field_max = self._dspin(10_000.0, 1_000_000.0, 10_000.0, 0, 300_000.0)
+        self.e_field_max.setToolTip(
+            "Maximum E-field in the Magboltz table [V/cm].\n"
+            "Must exceed the peak near-wire field (~200–400 kV/cm at 1900 V)."
+        )
 
         self.gas_file_label = QLabel()
         self.gas_file_label.setWordWrap(True)
@@ -237,6 +271,9 @@ class ConfigPanel(QScrollArea):
         gas_form.addRow("Penning transfer",    self.penning)
         gas_form.addRow("Magboltz ncoll",      self.ncoll)
         gas_form.addRow("W-value [eV]",        self.w_value)
+        gas_form.addRow("Max e⁻ energy [eV]",  self.max_electron_energy)
+        gas_form.addRow("Field points",        self.n_field_pts)
+        gas_form.addRow("E-field max [V/cm]",  self.e_field_max)
         gas_form.addRow("Gas file (auto)",     self.gas_file_label)
         root_layout.addWidget(gas_box)
 
@@ -245,6 +282,9 @@ class ConfigPanel(QScrollArea):
         self.pressure.valueChanged.connect(self._update_gas_file_label)
         self.penning.toggled.connect(self._update_gas_file_label)
         self.ncoll.valueChanged.connect(self._update_gas_file_label)
+        self.max_electron_energy.valueChanged.connect(self._update_gas_file_label)
+        self.n_field_pts.valueChanged.connect(self._update_gas_file_label)
+        self.e_field_max.valueChanged.connect(self._update_gas_file_label)
 
         # ── Simulation ────────────────────────────────────────────────────
         sim_box  = QGroupBox("Simulation")
@@ -252,7 +292,7 @@ class ConfigPanel(QScrollArea):
 
         self.n_events    = self._spin(1, 100000, 1000)
         self.max_aval    = self._spin(1000, 10000000, 500000)
-        self.time_window = self._dspin(10.0, 2000.0, 10.0, 1, 300.0)
+        self.time_window = self._dspin(10.0, 20000.0, 10.0, 1, 300.0)
         self.time_step   = self._dspin(0.1, 10.0, 0.1, 2, 0.5)
         self.enable_ion_drift = QCheckBox()
         self.enable_ion_drift.setChecked(True)
@@ -321,16 +361,24 @@ class ConfigPanel(QScrollArea):
 
     def _update_gas_file_label(self):
         gas = {
-            "temperature_K":         self.temperature.value(),
-            "pressure_Torr":         self.pressure.value(),
-            "enable_penning":        self.penning.isChecked(),
-            "n_magboltz_collisions": self.ncoll.value(),
-            **self._hidden_gas,
+            "temperature_K":          self.temperature.value(),
+            "pressure_Torr":          self.pressure.value(),
+            "enable_penning":         self.penning.isChecked(),
+            "n_magboltz_collisions":  self.ncoll.value(),
+            "max_electron_energy_eV": self.max_electron_energy.value(),
+            "n_field_points":         self.n_field_pts.value(),
+            "e_field_max_vcm":        self.e_field_max.value(),
         }
         name = derive_gas_filename(gas)
         exists = (TGC_DIR / name).exists()
         status = "✓ exists" if exists else "will be generated"
         self.gas_file_label.setText(f"{name}\n[{status}]")
+
+    def _update_readout_widgets(self):
+        resistive = self.readout_type.currentText() == "Resistive"
+        self.insulator_material.setEnabled(resistive)
+        self.insulator_thickness.setEnabled(resistive)
+        self.surface_resistivity.setEnabled(resistive)
 
     # ── file dialogs ─────────────────────────────────────────────────────
 
@@ -351,6 +399,9 @@ class ConfigPanel(QScrollArea):
 
         x_pos = None if self.x_random.isChecked() else self.x_pos.value()
 
+        ro_type = self.readout_type.currentText().lower()
+        ins_mat = self.insulator_material.currentText().lower()
+
         return {
             "geometry": {
                 "wire_pitch_cm":    self.wire_pitch.value(),
@@ -358,6 +409,12 @@ class ConfigPanel(QScrollArea):
                 "gap_cm":           self.gap_cm.value(),
                 "n_wires":          self.n_wires.value(),
                 "wire_voltage_V":   self.wire_volts.value(),
+            },
+            "readout": {
+                "type":                       ro_type,
+                "insulator_material":         ins_mat,
+                "insulator_thickness_um":     self.insulator_thickness.value(),
+                "surface_resistivity_ohm_sq": self.surface_resistivity.value() * 1000.0,
             },
             "source": {
                 "energy_keV":          self.energy_kev.value(),
@@ -370,9 +427,9 @@ class ConfigPanel(QScrollArea):
                 "enable_penning":         self.penning.isChecked(),
                 "n_magboltz_collisions":  self.ncoll.value(),
                 "w_value_eV":             self.w_value.value(),
-                "max_electron_energy_eV": self._hidden_gas["max_electron_energy_eV"],
-                "n_field_points":         self._hidden_gas["n_field_points"],
-                "e_field_max_vcm":        self._hidden_gas["e_field_max_vcm"],
+                "max_electron_energy_eV": self.max_electron_energy.value(),
+                "n_field_points":         self.n_field_pts.value(),
+                "e_field_max_vcm":        self.e_field_max.value(),
             },
             "simulation": {
                 "n_events":           self.n_events.value(),
@@ -393,6 +450,14 @@ class ConfigPanel(QScrollArea):
         self.n_wires.setValue(   g.get("n_wires", 10))
         self.wire_volts.setValue(g.get("wire_voltage_V", 1900.0))
 
+        ro = d.get("readout", {})
+        ro_type = ro.get("type", "conductive")
+        self.readout_type.setCurrentIndex(0 if ro_type == "conductive" else 1)
+        ins_mat = ro.get("insulator_material", "kapton")
+        self.insulator_material.setCurrentIndex(0 if ins_mat == "kapton" else 1)
+        self.insulator_thickness.setValue(ro.get("insulator_thickness_um", 100.0))
+        self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
+
         s = d.get("source", {})
         self.energy_kev.setValue(s.get("energy_keV", 5.9))
         dists = s.get("source_distances_mm", [0.2, 0.5, 0.9, 1.2])
@@ -410,10 +475,9 @@ class ConfigPanel(QScrollArea):
         self.penning.setChecked(  gas.get("enable_penning", True))
         self.ncoll.setValue(      gas.get("n_magboltz_collisions", 10))
         self.w_value.setValue(    gas.get("w_value_eV", 26.0))
-        self._hidden_gas["max_electron_energy_eV"] = gas.get("max_electron_energy_eV", 2000.0)
-        self._hidden_gas["n_field_points"]         = gas.get("n_field_points", 20)
-        self._hidden_gas["e_field_max_vcm"]        = gas.get("e_field_max_vcm", 300000.0)
-        self._update_gas_file_label()
+        self.max_electron_energy.setValue(gas.get("max_electron_energy_eV", 2000.0))
+        self.n_field_pts.setValue(        gas.get("n_field_points", 20))
+        self.e_field_max.setValue(        gas.get("e_field_max_vcm", 300_000.0))
 
         sim = d.get("simulation", {})
         self.n_events.setValue(        sim.get("n_events", 1000))
@@ -448,6 +512,15 @@ class Mpl3DCanvas(FigureCanvasQTAgg):
         self.figure = Figure(figsize=figsize)
         self.ax = self.figure.add_subplot(111, projection="3d")
         super().__init__(self.figure)
+        self._user_dist = None  # persists user zoom across redraws
+        self.mpl_connect("scroll_event", self._on_scroll)
+
+    def _on_scroll(self, event):
+        if event.inaxes is not self.ax:
+            return
+        self._user_dist = self.ax.dist * (0.9 if event.step > 0 else 1.1)
+        self.ax.dist = self._user_dist
+        self.draw_idle()
 
 
 # ---------------------------------------------------------------------------
@@ -474,14 +547,16 @@ class ResultsPanel(QTabWidget):
         self.table.setAlternatingRowColors(True)
         self.addTab(self.table, "Summary")
 
-        # ── Plots tab: 2×2 matplotlib figure ─────────────────────────────
-        self.plots_canvas = MplCanvas(nrows=2, ncols=2, figsize=(7, 5))
+        # ── Plots tab: 2×3 matplotlib figure ─────────────────────────────
+        self.plots_canvas = MplCanvas(nrows=2, ncols=3, figsize=(11, 5))
         self.addTab(self.plots_canvas, "Plots")
 
         # ── Waveforms tab: ROOT TCanvas browser ──────────────────────────
         self._waveform_data: dict = {}
         self._root_canvas  = None    # ROOT TCanvas (kept alive between events)
         self._root_objects: list = []  # TGraph/TLegend objects (prevent Python GC)
+        self._charge_canvas  = None   # ROOT TCanvas for charge integrals
+        self._charge_objects: list = []
         self._track_data:   dict = {}  # label → dict of numpy object arrays
         self._track_geom:   dict | None = None
 
@@ -535,6 +610,46 @@ class ResultsPanel(QTabWidget):
         self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
 
         self.addTab(wave_widget, "Waveforms")
+
+        # ── Charges tab: cumulative integral of waveforms ────────────────────
+        charge_widget  = QWidget()
+        charge_layout  = QVBoxLayout(charge_widget)
+        charge_layout.setContentsMargins(8, 6, 8, 6)
+        charge_layout.setSpacing(6)
+
+        # — selector row —
+        ch_sel_row = QWidget()
+        ch_sel_h   = QHBoxLayout(ch_sel_row)
+        ch_sel_h.setContentsMargins(0, 0, 0, 0)
+        ch_sel_h.addWidget(QLabel("Distance:"))
+        self.charge_dist_combo = QComboBox()
+        ch_sel_h.addWidget(self.charge_dist_combo)
+        ch_sel_h.addSpacing(16)
+        ch_sel_h.addWidget(QLabel("Event:"))
+        self.charge_event_slider = QSlider(Qt.Horizontal)
+        self.charge_event_slider.setMinimum(0)
+        self.charge_event_slider.setMaximum(0)
+        self.charge_event_slider.setSingleStep(1)
+        ch_sel_h.addWidget(self.charge_event_slider)
+        self.charge_event_label = QLabel("— / —")
+        self.charge_event_label.setMinimumWidth(55)
+        ch_sel_h.addWidget(self.charge_event_label)
+        charge_layout.addWidget(ch_sel_row)
+
+        # — hint —
+        ch_hint = QLabel(
+            "ROOT canvas opens automatically when results are loaded.\n"
+            "Right-click inside the ROOT window to zoom, change axes, or save."
+        )
+        ch_hint.setWordWrap(True)
+        ch_hint.setStyleSheet("color: grey; font-size: 11px;")
+        charge_layout.addWidget(ch_hint)
+        charge_layout.addStretch()
+
+        self.charge_dist_combo.currentIndexChanged.connect(self._on_charge_dist_changed)
+        self.charge_event_slider.valueChanged.connect(self._update_charge_plot)
+
+        self.addTab(charge_widget, "Charges")
 
         # ── 3D Tracks tab ─────────────────────────────────────────────────────
         tracks_widget = QWidget()
@@ -640,14 +755,18 @@ class ResultsPanel(QTabWidget):
             ax.set_title(title)
             ax.grid(True, alpha=0.3)
 
-        _errplot(axes[0], "mean_anode_charge_fC",   "sem_anode_charge_fC",
-                 "⟨Q_anode⟩ [fC]",        "Anode charge vs distance")
-        _errplot(axes[1], "mean_cathode_charge_fC", "sem_cathode_charge_fC",
-                 "⟨Q_cathode⟩ [fC]",      "Cathode charge vs distance")
-        _errplot(axes[2], "mean_charge_ratio",      "sem_charge_ratio",
-                 "Q_cathode / Q_anode",   "Charge ratio vs distance")
-        _errplot(axes[3], "mean_avalanche_size",    None,
-                 "⟨Avalanche size⟩",      "Avalanche size vs distance")
+        _errplot(axes[0], "mean_anode_charge_fC",       "sem_anode_charge_fC",
+                 "⟨Q_anode⟩ [fC]",            "Anode charge vs distance")
+        _errplot(axes[1], "mean_cathode_charge_fC",     "sem_cathode_charge_fC",
+                 "⟨Q_cathode⟩ [fC]",          "Cathode (readout) vs distance")
+        _errplot(axes[2], "mean_cathode_top_charge_fC", "sem_cathode_top_charge_fC",
+                 "⟨Q_cathode_top⟩ [fC]",      "Cathode-top vs distance")
+        _errplot(axes[3], "mean_charge_ratio",          "sem_charge_ratio",
+                 "Q_cathode / Q_anode",        "Charge ratio vs distance")
+        _errplot(axes[4], "mean_avalanche_size",        None,
+                 "⟨Avalanche size⟩",           "Avalanche size vs distance")
+        if len(axes) > 5:
+            axes[5].axis("off")   # unused 6th cell
 
         self.plots_canvas.figure.tight_layout()
         self.plots_canvas.draw()
@@ -677,6 +796,8 @@ class ResultsPanel(QTabWidget):
         self._waveform_data.clear()
         self.wave_dist_combo.blockSignals(True)
         self.wave_dist_combo.clear()
+        self.charge_dist_combo.blockSignals(True)
+        self.charge_dist_combo.clear()
 
         try:
             with uproot.open(root_path) as f:
@@ -707,15 +828,19 @@ class ResultsPanel(QTabWidget):
                             "mean_c":  mean_c,
                         }
                         self.wave_dist_combo.addItem(label)
+                        self.charge_dist_combo.addItem(label)
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file: {exc}")
 
         self.wave_dist_combo.blockSignals(False)
+        self.charge_dist_combo.blockSignals(False)
         if self.wave_dist_combo.count():
             self._on_wave_dist_changed(0)
             self._root_timer.start()
+        if self.charge_dist_combo.count():
+            self._on_charge_dist_changed(0)
 
     def _on_wave_dist_changed(self, index: int):
         label = self.wave_dist_combo.currentText()
@@ -802,6 +927,92 @@ class ResultsPanel(QTabWidget):
 
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] ROOT canvas error: {exc}")
+
+    # ── Charges (cumulative integral) ─────────────────────────────────────────
+
+    def _on_charge_dist_changed(self, index: int):
+        label = self.charge_dist_combo.currentText()
+        data  = self._waveform_data.get(label)
+        if data is None:
+            return
+        n = len(data["anode"])
+        self.charge_event_slider.blockSignals(True)
+        self.charge_event_slider.setMaximum(max(0, n - 1))
+        self.charge_event_slider.setValue(0)
+        self.charge_event_slider.blockSignals(False)
+        self.charge_event_label.setText(f"1 / {n}")
+        self._update_charge_plot()
+
+    def _update_charge_plot(self):
+        """Draw cumulative charge integrals Q(t) in a ROOT TCanvas (anode top, cathode bottom)."""
+        label = self.charge_dist_combo.currentText()
+        data  = self._waveform_data.get(label)
+        if data is None:
+            return
+
+        evt_idx = self.charge_event_slider.value()
+        n       = len(data["anode"])
+        self.charge_event_label.setText(f"{evt_idx + 1} / {n}")
+
+        times   = data["times"].astype("f8")
+        anode   = data["anode"][evt_idx].astype("f8")
+        cathode = data["cathode"][evt_idx].astype("f8")
+        mean_a  = data["mean_a"].astype("f8")
+        mean_c  = data["mean_c"].astype("f8")
+        nbins   = len(times)
+        dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
+
+        # Cumulative integrals [fC]; anode signal is negative by convention → negate.
+        anode_int   = -np.cumsum(anode)  * dt
+        cathode_int =  np.cumsum(cathode) * dt
+        mean_a_int  = -np.cumsum(mean_a) * dt
+        mean_c_int  =  np.cumsum(mean_c) * dt
+
+        try:
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
+
+            if self._charge_canvas is None:
+                self._charge_canvas = ROOT.TCanvas(
+                    "tgc_charges", "TGC Charges", 950, 700
+                )
+                self._charge_canvas.SetWindowSize(950, 700)
+
+            self._charge_canvas.Clear()
+            self._charge_canvas.Divide(1, 2)
+            self._charge_objects.clear()
+
+            def _draw_pad(pad_idx: int, y_evt: np.ndarray, y_mean: np.ndarray,
+                          signal_name: str, line_color: int):
+                self._charge_canvas.cd(pad_idx)
+                ROOT.gPad.SetGrid()
+                ga = ROOT.TGraph(nbins, times, y_evt)
+                ga.SetTitle(
+                    f"{signal_name} charge - {label}, event {evt_idx + 1};"
+                    f"Time [ns];Q [fC]"
+                )
+                ga.SetLineColor(line_color)
+                ga.SetLineWidth(2)
+                gm = ROOT.TGraph(nbins, times, y_mean)
+                gm.SetLineColor(ROOT.kGray + 1)
+                gm.SetLineWidth(1)
+                gm.SetLineStyle(2)
+                ga.Draw("AL")
+                gm.Draw("L same")
+                leg = ROOT.TLegend(0.65, 0.75, 0.88, 0.88)
+                leg.AddEntry(ga, "this event", "L")
+                leg.AddEntry(gm, "mean",       "L")
+                leg.SetBorderSize(0)
+                leg.Draw()
+                self._charge_objects.extend([ga, gm, leg])
+
+            _draw_pad(1, anode_int,   mean_a_int, "Anode",   ROOT.kBlue + 1)
+            _draw_pad(2, cathode_int, mean_c_int, "Cathode", ROOT.kRed  + 1)
+
+            self._charge_canvas.Update()
+
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT charge canvas error: {exc}")
 
     # ── 3D Tracks ──────────────────────────────────────────────────────────────
 
@@ -982,6 +1193,8 @@ class ResultsPanel(QTabWidget):
         ax.legend(by_label.values(), by_label.keys(),
                   loc="upper right", fontsize=7, framealpha=0.6)
 
+        if self.tracks_canvas._user_dist is not None:
+            self.tracks_canvas.ax.dist = self.tracks_canvas._user_dist
         self.tracks_canvas.figure.tight_layout()
         self.tracks_canvas.draw_idle()
 
