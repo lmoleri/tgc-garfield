@@ -89,6 +89,7 @@ struct ReadoutConfig {
   std::string insulatorMaterial       = "kapton";     // "kapton" | "fr4"
   double      insulatorThicknessUm    = 100.0;
   double      surfaceResistivityOhmSq = 500e3;
+  bool        enableDelayedSignal     = true;  // if false, skip SetDelayedWeightingPotential
 };
 
 struct SourceConfig {
@@ -365,6 +366,8 @@ Config LoadConfig(const fs::path& path) {
                                                       cfg.readout.insulatorThicknessUm);
     cfg.readout.surfaceResistivityOhmSq = ReadDouble(*r, "readout", "surface_resistivity_ohm_sq",
                                                       cfg.readout.surfaceResistivityOhmSq);
+    cfg.readout.enableDelayedSignal     = ReadBool  (*r, "readout", "enable_delayed_signal",
+                                                      cfg.readout.enableDelayedSignal);
   }
 
   if (const auto* s = FindSection(root, "source")) {
@@ -535,34 +538,38 @@ void SetupResistiveReadout(ComponentUser& cmp,
         wy = -alpha / gap;
       }, "cathode");
 
-  // Delayed weighting potential: W_d(y,t) = W_s(y) × (exp(−t/τ) − 1)
-  // Total W = W_s + W_d = W_s × exp(−t/τ) → decays to 0 as surface potential
-  // at landing point is pulled to ground by the resistive sheet.
-  cmp.SetDelayedWeightingPotential(
-      [alpha, gap, tauNs](const double, const double y, const double,
-                          const double t) {
-        return alpha * (y + gap) / gap * (std::exp(-t / tauNs) - 1.0);
-      }, "cathode");
+  if (ro.enableDelayedSignal) {
+    // Delayed weighting potential: W_d(y,t) = W_s(y) × (exp(−t/τ) − 1)
+    // Total W = W_s + W_d = W_s × exp(−t/τ) → decays to 0 as surface potential
+    // at landing point is pulled to ground by the resistive sheet.
+    cmp.SetDelayedWeightingPotential(
+        [alpha, gap, tauNs](const double, const double y, const double,
+                            const double t) {
+          return alpha * (y + gap) / gap * (std::exp(-t / tauNs) - 1.0);
+        }, "cathode");
 
-  // Delayed weighting field: E_wd = −dW_d/dy = (α/gap)(1 − exp(−t/τ)) ŷ
-  cmp.SetDelayedWeightingField(
-      [alpha, gap, tauNs](const double, const double, const double,
-                          const double t,
-                          double& wx, double& wy, double& wz) {
-        wx = wz = 0.;
-        wy = -alpha / gap * (std::exp(-t / tauNs) - 1.0);
-      }, "cathode");
+    // Delayed weighting field: E_wd = −dW_d/dy = (α/gap)(1 − exp(−t/τ)) ŷ
+    cmp.SetDelayedWeightingField(
+        [alpha, gap, tauNs](const double, const double, const double,
+                            const double t,
+                            double& wx, double& wy, double& wz) {
+          wx = wz = 0.;
+          wy = -alpha / gap * (std::exp(-t / tauNs) - 1.0);
+        }, "cathode");
 
-  // Sample delayed signal over max(5τ, full time window), 200 points
-  const double maxDelayNs = std::max(5.0 * tauNs, sim.timeWindowNs);
-  constexpr std::size_t nDelayPts = 200;
-  std::vector<double> dtimes(nDelayPts);
-  for (std::size_t i = 0; i < nDelayPts; ++i)
-    dtimes[i] = (i + 1) * maxDelayNs / nDelayPts;
-  cmp.SetDelayedSignalTimes(dtimes);
+    // Sample delayed signal over max(5τ, full time window), 200 points
+    const double maxDelayNs = std::max(5.0 * tauNs, sim.timeWindowNs);
+    constexpr std::size_t nDelayPts = 200;
+    std::vector<double> dtimes(nDelayPts);
+    for (std::size_t i = 0; i < nDelayPts; ++i)
+      dtimes[i] = (i + 1) * maxDelayNs / nDelayPts;
+    cmp.SetDelayedSignalTimes(dtimes);
+  }
 
   std::cout << "  Resistive readout: α = " << alpha
-            << ", τ = " << tauNs << " ns\n";
+            << ", τ = " << tauNs << " ns"
+            << (ro.enableDelayedSignal ? "" : " (delayed signal disabled)")
+            << "\n";
 }
 
 void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
@@ -578,7 +585,7 @@ void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
                                  : static_cast<Garfield::Component*>(&cmp),
                       "cathode");           // bottom cathode plane (readout)
   sensor.AddElectrode(&cmp, "cathode_top"); // top cathode plane (Ramo cross-check)
-  if (cmpReadout) sensor.EnableDelayedSignal();
+  if (cmpReadout && cfg.readout.enableDelayedSignal) sensor.EnableDelayedSignal();
 
   const std::size_t nBins =
       static_cast<std::size_t>(std::round(sim.timeWindowNs / sim.timeStepNs));
@@ -1012,10 +1019,11 @@ json ConfigToJson(const Config& cfg) {
       {"wire_voltage_V",   cfg.geometry.wireVoltageV}
     }},
     {"readout", {
-      {"type",                      cfg.readout.type},
-      {"insulator_material",        cfg.readout.insulatorMaterial},
-      {"insulator_thickness_um",    cfg.readout.insulatorThicknessUm},
-      {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq}
+      {"type",                       cfg.readout.type},
+      {"insulator_material",         cfg.readout.insulatorMaterial},
+      {"insulator_thickness_um",     cfg.readout.insulatorThicknessUm},
+      {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq},
+      {"enable_delayed_signal",      cfg.readout.enableDelayedSignal}
     }},
     {"source", jSrc},
     {"gas", {
@@ -1083,7 +1091,8 @@ int main(int argc, char* argv[]) {
               << (cfg.readout.type == "resistive"
                     ? (" (" + cfg.readout.insulatorMaterial
                        + ", " + std::to_string(static_cast<int>(cfg.readout.insulatorThicknessUm)) + " μm"
-                       + ", " + std::to_string(static_cast<int>(cfg.readout.surfaceResistivityOhmSq / 1000)) + " kΩ/sq)")
+                       + ", " + std::to_string(static_cast<int>(cfg.readout.surfaceResistivityOhmSq / 1000)) + " kΩ/sq"
+                       + (cfg.readout.enableDelayedSignal ? ", delayed signal on" : ", delayed signal off") + ")")
                     : std::string())
               << "\n"
               << "  gas     : Ar:CO2 70:30, " << cfg.gas.temperatureK << " K, "

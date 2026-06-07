@@ -388,6 +388,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_material`           | string | —     | `"kapton"`      | Insulating substrate material. Sets the relative permittivity used for the dielectric correction and τ calculation. `"kapton"` → ε_r = 3.5; `"fr4"` → ε_r = 4.6. Ignored when `type = "conductive"` |
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
+| `enable_delayed_signal`        | bool   | —     | `true`          | When `false`, skips `SetDelayedWeightingPotential` — the static α-corrected weighting potential is still applied, but `sensor.EnableDelayedSignal()` is not called. Removes the ~200× per-step overhead for exploratory runs. Ignored when `type = "conductive"` |
 
 ### `source`
 

@@ -10,7 +10,8 @@
     "type": "conductive",
     "insulator_material": "kapton",
     "insulator_thickness_um": 100.0,
-    "surface_resistivity_ohm_sq": 500000.0
+    "surface_resistivity_ohm_sq": 500000.0,
+    "enable_delayed_signal": true
   },
   "source": {
     "energy_keV": 5.9,

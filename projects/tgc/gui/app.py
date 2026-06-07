@@ -202,10 +202,19 @@ class ConfigPanel(QScrollArea):
         self.surface_resistivity = self._dspin(1.0, 1e7, 100.0, 1, 500.0)
         self.surface_resistivity.setToolTip("Resistive layer surface resistivity [kΩ/sq]")
 
+        self.delayed_signal_cb = QCheckBox()
+        self.delayed_signal_cb.setChecked(True)
+        self.delayed_signal_cb.setToolTip(
+            "When unchecked, skips the time-varying delayed weighting potential.\n"
+            "The static α-corrected weighting potential is still applied.\n"
+            "Disabling removes the ~200× per-step overhead and gives conductive-like speed."
+        )
+
         ro_form.addRow("Type",                   self.readout_type)
         ro_form.addRow("Insulator material",     self.insulator_material)
         ro_form.addRow("Thickness [μm]",         self.insulator_thickness)
         ro_form.addRow("Resistivity [kΩ/sq]",    self.surface_resistivity)
+        ro_form.addRow("Delayed signal",         self.delayed_signal_cb)
         root_layout.addWidget(ro_box)
 
         self._update_readout_widgets()
@@ -379,6 +388,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_material.setEnabled(resistive)
         self.insulator_thickness.setEnabled(resistive)
         self.surface_resistivity.setEnabled(resistive)
+        self.delayed_signal_cb.setEnabled(resistive)
 
     # ── file dialogs ─────────────────────────────────────────────────────
 
@@ -415,6 +425,7 @@ class ConfigPanel(QScrollArea):
                 "insulator_material":         ins_mat,
                 "insulator_thickness_um":     self.insulator_thickness.value(),
                 "surface_resistivity_ohm_sq": self.surface_resistivity.value() * 1000.0,
+                "enable_delayed_signal":      self.delayed_signal_cb.isChecked(),
             },
             "source": {
                 "energy_keV":          self.energy_kev.value(),
@@ -457,6 +468,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_material.setCurrentIndex(0 if ins_mat == "kapton" else 1)
         self.insulator_thickness.setValue(ro.get("insulator_thickness_um", 100.0))
         self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
+        self.delayed_signal_cb.setChecked(ro.get("enable_delayed_signal", True))
 
         s = d.get("source", {})
         self.energy_kev.setValue(s.get("energy_keV", 5.9))
@@ -559,6 +571,7 @@ class ResultsPanel(QTabWidget):
         self._charge_objects: list = []
         self._track_data:   dict = {}  # label → dict of numpy object arrays
         self._track_geom:   dict | None = None
+        self._efield_cache: dict | None = None   # {x, y, Ex, Ey} computed arrays
 
         wave_widget = QWidget()
         wave_layout = QVBoxLayout(wave_widget)
@@ -687,6 +700,98 @@ class ResultsPanel(QTabWidget):
         self.trk_event_slider.sliderReleased.connect(self._update_track_plot)
 
         self.addTab(tracks_widget, "3D Tracks")
+
+        # ── E-Field tab ───────────────────────────────────────────────────────
+        efield_widget = QWidget()
+        efield_layout = QVBoxLayout(efield_widget)
+        efield_layout.setContentsMargins(8, 6, 8, 6)
+        efield_layout.setSpacing(6)
+
+        # — row 1: geometry inputs —
+        geom_row = QWidget()
+        geom_h   = QHBoxLayout(geom_row)
+        geom_h.setContentsMargins(0, 0, 0, 0)
+
+        def _add_geom_spin(label, widget):
+            geom_h.addWidget(QLabel(label))
+            geom_h.addWidget(widget)
+            geom_h.addSpacing(8)
+
+        self.ef_gap       = QDoubleSpinBox()
+        self.ef_gap.setRange(0.01, 5.0);  self.ef_gap.setSingleStep(0.01)
+        self.ef_gap.setDecimals(3);       self.ef_gap.setValue(0.14)
+        self.ef_pitch     = QDoubleSpinBox()
+        self.ef_pitch.setRange(0.01, 5.0); self.ef_pitch.setSingleStep(0.01)
+        self.ef_pitch.setDecimals(3);      self.ef_pitch.setValue(0.18)
+        self.ef_n_wires   = QSpinBox()
+        self.ef_n_wires.setRange(2, 200);  self.ef_n_wires.setValue(10)
+        self.ef_wire_diam = QDoubleSpinBox()
+        self.ef_wire_diam.setRange(1.0, 1000.0); self.ef_wire_diam.setSingleStep(1.0)
+        self.ef_wire_diam.setDecimals(1);         self.ef_wire_diam.setValue(50.0)
+        self.ef_wire_volt = QDoubleSpinBox()
+        self.ef_wire_volt.setRange(100.0, 10000.0); self.ef_wire_volt.setSingleStep(100.0)
+        self.ef_wire_volt.setDecimals(0);           self.ef_wire_volt.setValue(1900.0)
+
+        _add_geom_spin("Gap [cm]:",         self.ef_gap)
+        _add_geom_spin("Pitch [cm]:",       self.ef_pitch)
+        _add_geom_spin("N wires:",          self.ef_n_wires)
+        _add_geom_spin("Wire diam [µm]:",   self.ef_wire_diam)
+        _add_geom_spin("Wire voltage [V]:", self.ef_wire_volt)
+        geom_h.addStretch()
+        efield_layout.addWidget(geom_row)
+
+        # — row 2: slice depths + component + colormap + compute button —
+        ctrl_row = QWidget()
+        ctrl_h   = QHBoxLayout(ctrl_row)
+        ctrl_h.setContentsMargins(0, 0, 0, 0)
+
+        ctrl_h.addWidget(QLabel("ZX plane at y [cm]:"))
+        self.ef_y_depth = QDoubleSpinBox()
+        self.ef_y_depth.setRange(-0.14, 0.14); self.ef_y_depth.setSingleStep(0.01)
+        self.ef_y_depth.setDecimals(3);        self.ef_y_depth.setValue(0.0)
+        ctrl_h.addWidget(self.ef_y_depth)
+        ctrl_h.addSpacing(12)
+
+        ctrl_h.addWidget(QLabel("ZY plane at x [cm]:"))
+        self.ef_x_depth = QDoubleSpinBox()
+        self.ef_x_depth.setRange(-1.0, 1.0);  self.ef_x_depth.setSingleStep(0.01)
+        self.ef_x_depth.setDecimals(3);        self.ef_x_depth.setValue(0.0)
+        ctrl_h.addWidget(self.ef_x_depth)
+        ctrl_h.addSpacing(12)
+
+        ctrl_h.addWidget(QLabel("Component:"))
+        self.ef_component = QComboBox()
+        self.ef_component.addItems(["|E|", "Ex", "Ey"])
+        ctrl_h.addWidget(self.ef_component)
+        ctrl_h.addSpacing(8)
+
+        ctrl_h.addWidget(QLabel("Colormap:"))
+        self.ef_cmap = QComboBox()
+        self.ef_cmap.addItems(["viridis", "plasma", "hot_r", "RdBu_r"])
+        ctrl_h.addWidget(self.ef_cmap)
+        ctrl_h.addSpacing(12)
+
+        ef_compute_btn = QPushButton("Compute")
+        ef_compute_btn.clicked.connect(lambda: self._update_efield_plots(recompute=True))
+        ctrl_h.addWidget(ef_compute_btn)
+        ctrl_h.addStretch()
+        efield_layout.addWidget(ctrl_row)
+
+        # — canvas: 3 subplots —
+        self.efield_canvas = MplCanvas(nrows=1, ncols=3, figsize=(13, 4))
+        efield_layout.addWidget(self.efield_canvas, stretch=1)
+
+        # Depth spinboxes re-slice without recomputing the field
+        self.ef_y_depth.valueChanged.connect(
+            lambda: self._update_efield_plots(recompute=False))
+        self.ef_x_depth.valueChanged.connect(
+            lambda: self._update_efield_plots(recompute=False))
+        self.ef_component.currentIndexChanged.connect(
+            lambda: self._update_efield_plots(recompute=False))
+        self.ef_cmap.currentIndexChanged.connect(
+            lambda: self._update_efield_plots(recompute=False))
+
+        self.addTab(efield_widget, "E-Field")
 
         # — timer to keep ROOT canvas responsive —
         self._root_timer = QTimer(self)
@@ -1037,12 +1142,26 @@ class ResultsPanel(QTabWidget):
                     rc = json.load(f)
                 g = rc.get("geometry", {})
                 self._track_geom = {
-                    "wire_pitch_cm": g.get("wire_pitch_cm", 0.18),
-                    "n_wires":       int(g.get("n_wires", 10)),
-                    "gap_cm":        g.get("gap_cm", 0.14),
+                    "wire_pitch_cm": g.get("wire_pitch_cm",   0.18),
+                    "n_wires":       int(g.get("n_wires",     10)),
+                    "gap_cm":        g.get("gap_cm",          0.14),
+                    "wire_diam_um":  g.get("wire_diameter_um", 50.0),
+                    "wire_volt_V":   g.get("wire_voltage_V",  1900.0),
                 }
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[GUI] run_config.json read error: {exc}")
+
+        # Pre-populate E-Field tab geometry spinboxes
+        if self._track_geom:
+            tg = self._track_geom
+            self.ef_gap.setValue(tg["gap_cm"])
+            self.ef_pitch.setValue(tg["wire_pitch_cm"])
+            self.ef_n_wires.setValue(tg["n_wires"])
+            self.ef_wire_diam.setValue(tg["wire_diam_um"])
+            self.ef_wire_volt.setValue(tg["wire_volt_V"])
+            x_half = (tg["n_wires"] - 1) / 2 * tg["wire_pitch_cm"] + tg["wire_pitch_cm"]
+            self.ef_y_depth.setRange(-tg["gap_cm"], tg["gap_cm"])
+            self.ef_x_depth.setRange(-x_half, x_half)
 
         if not Path(root_path).exists():
             self.trk_dist_combo.blockSignals(False)
@@ -1197,6 +1316,139 @@ class ResultsPanel(QTabWidget):
             self.tracks_canvas.ax.dist = self.tracks_canvas._user_dist
         self.tracks_canvas.figure.tight_layout()
         self.tracks_canvas.draw_idle()
+
+    # ── E-Field ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_efield(gap, pitch, n_wires, wire_diam_um, wire_volt,
+                        nx=250, ny=150, n_images=12):
+        """
+        Compute TGC electric field on a 2D grid (XY plane) using the image-charge
+        method with Sauli's capacitance approximation.
+
+        Returns (x, y, Ex, Ey) — all in cm / (V/cm).
+        """
+        a       = wire_diam_um * 1e-4 / 2           # wire radius [cm]
+        x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
+        x_half  = (n_wires - 1) / 2 * pitch + pitch
+        eps0    = 8.854e-14                          # F/cm
+
+        # Sauli 1977 capacitance coefficient (eq. 2.3)
+        C_inv  = np.log(pitch / (2 * np.pi * a)) + np.pi * gap / pitch
+        lam_w  = 2 * np.pi * eps0 * wire_volt / C_inv  # C/cm
+
+        x = np.linspace(-x_half, x_half, nx)
+        y = np.linspace(-gap * 0.999, gap * 0.999, ny)
+        X, Y = np.meshgrid(x, y)
+
+        Ex = np.zeros((ny, nx))
+        Ey = np.zeros((ny, nx))
+        n_arr = np.arange(-n_images, n_images + 1)
+
+        for x_w in x_wires:
+            y_imgs = (2 * n_arr * gap)[:, None, None]          # (N, 1, 1)
+            signs  = ((-1) ** np.abs(n_arr))[:, None, None]    # (N, 1, 1)
+            dx     = X[None] - x_w                              # (1, ny, nx)
+            dy     = Y[None] - y_imgs                           # (N, ny, nx)
+            r2     = np.maximum(dx ** 2 + dy ** 2, a ** 2)
+            fac    = signs * lam_w / (2 * np.pi * eps0 * r2)
+            Ex    += np.sum(fac * dx, axis=0)
+            Ey    += np.sum(fac * dy, axis=0)
+
+        return x, y, Ex, Ey
+
+    def _update_efield_plots(self, recompute: bool = True):
+        """Draw electric-field maps for XY, ZX-slice, and ZY-slice planes."""
+        if recompute:
+            gap       = self.ef_gap.value()
+            pitch     = self.ef_pitch.value()
+            n_wires   = self.ef_n_wires.value()
+            diam_um   = self.ef_wire_diam.value()
+            wire_volt = self.ef_wire_volt.value()
+            try:
+                x, y, Ex, Ey = self._compute_efield(
+                    gap, pitch, n_wires, diam_um, wire_volt)
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[GUI] E-field computation error: {exc}")
+                return
+            self._efield_cache = {"x": x, "y": y, "Ex": Ex, "Ey": Ey,
+                                  "gap": gap, "pitch": pitch,
+                                  "n_wires": n_wires}
+        elif self._efield_cache is None:
+            return  # nothing cached yet
+
+        c      = self._efield_cache
+        x, y   = c["x"], c["y"]
+        Ex, Ey = c["Ex"], c["Ey"]
+        gap    = c["gap"]
+        pitch  = c["pitch"]
+        n_wires = c["n_wires"]
+        x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
+        x_half  = (n_wires - 1) / 2 * pitch + pitch
+        z_half  = 0.5  # cm
+
+        comp = self.ef_component.currentText()
+        if   comp == "|E|": field = np.sqrt(Ex ** 2 + Ey ** 2)
+        elif comp == "Ex":  field = Ex
+        else:               field = Ey
+
+        cmap  = self.ef_cmap.currentText()
+        y0    = self.ef_y_depth.value()
+        x0    = self.ef_x_depth.value()
+        X, Y  = np.meshgrid(x, y)
+
+        axes = self.efield_canvas.axes
+        for ax in axes:
+            ax.cla()
+
+        # ── subplot 0: XY plane ───────────────────────────────────────────────
+        ax0 = axes[0]
+        im0 = ax0.pcolormesh(X, Y, field, cmap=cmap, shading="auto")
+        self.efield_canvas.figure.colorbar(im0, ax=ax0, label="V/cm")
+        for x_w in x_wires:
+            ax0.plot(x_w, 0, "wx", markersize=5, markeredgewidth=1.5)
+        ax0.axhline( gap, color="grey", lw=1, ls="--")
+        ax0.axhline(-gap, color="grey", lw=1, ls="--")
+        ax0.set_xlabel("x [cm]", fontsize=8)
+        ax0.set_ylabel("y [cm]", fontsize=8)
+        ax0.set_title(f"XY plane — {comp} [V/cm]", fontsize=9)
+        ax0.tick_params(labelsize=7)
+
+        # ── subplot 1: ZX plane at y = y0 ────────────────────────────────────
+        ax1 = axes[1]
+        iy  = int(np.argmin(np.abs(y - y0)))
+        E_xz = field[iy, :]                            # shape (nx,)
+        z    = np.array([-z_half, z_half])
+        Xg, Zg = np.meshgrid(x, z)
+        E_xz_2d = np.tile(E_xz, (2, 1))               # shape (2, nx)
+        im1 = ax1.pcolormesh(Xg, Zg, E_xz_2d, cmap=cmap, shading="auto",
+                             vmin=field.min(), vmax=field.max())
+        self.efield_canvas.figure.colorbar(im1, ax=ax1, label="V/cm")
+        for x_w in x_wires:
+            ax1.axvline(x_w, color="w", lw=0.5, ls=":")
+        ax1.set_xlabel("x [cm]", fontsize=8)
+        ax1.set_ylabel("z [cm]", fontsize=8)
+        ax1.set_title(f"ZX plane at y = {y[iy]:.3f} cm — {comp}", fontsize=9)
+        ax1.tick_params(labelsize=7)
+
+        # ── subplot 2: ZY plane at x = x0 ────────────────────────────────────
+        ax2 = axes[2]
+        ix  = int(np.argmin(np.abs(x - x0)))
+        E_zy = field[:, ix]                            # shape (ny,)
+        Zg2, Yg2 = np.meshgrid(z, y)
+        E_zy_2d = np.tile(E_zy[:, None], (1, 2))      # shape (ny, 2)
+        im2 = ax2.pcolormesh(Zg2, Yg2, E_zy_2d, cmap=cmap, shading="auto",
+                             vmin=field.min(), vmax=field.max())
+        self.efield_canvas.figure.colorbar(im2, ax=ax2, label="V/cm")
+        ax2.axhline( gap, color="grey", lw=1, ls="--")
+        ax2.axhline(-gap, color="grey", lw=1, ls="--")
+        ax2.set_xlabel("z [cm]", fontsize=8)
+        ax2.set_ylabel("y [cm]", fontsize=8)
+        ax2.set_title(f"ZY plane at x = {x[ix]:.3f} cm — {comp}", fontsize=9)
+        ax2.tick_params(labelsize=7)
+
+        self.efield_canvas.figure.tight_layout()
+        self.efield_canvas.draw_idle()
 
 
 # ---------------------------------------------------------------------------
