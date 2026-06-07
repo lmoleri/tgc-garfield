@@ -319,38 +319,39 @@ been built yet, the window opens with a warning in the title bar.
 ### Window layout
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  TGC Simulation               [▶ Run]  [■ Stop]  [Load Config]  [Save Config] │
-├────────────────────────────────┬─────────────────────────────────────────┤
-│  ▼ Geometry                    │  [ Log | Summary | Plots | Waveforms ]  │
-│    Wire pitch [cm]   0.18      │                                         │
-│    Wire diameter [μm] 50       │  ← live output / results shown here     │
-│    Gap [cm]          0.14      │                                         │
-│    N wires           10        │                                         │
-│    Wire voltage [V]  1900      │                                         │
-│  ▼ Readout                     │                                         │
-│    Type        [Conductive ▼]  │                                         │
-│    (Insulator  [Kapton ▼])     │                                         │
-│    (Thickness  100 μm)         │                                         │
-│    (Resistivity 500 kΩ/sq)     │                                         │
-│  ▼ Source                      │                                         │
-│    Energy [keV]      5.9       │                                         │
-│    Distances [mm]  0.2,0.5,…  │                                         │
-│    X position  [✓ Random]      │                                         │
-│  ▼ Gas                         │                                         │
-│    Temperature [K]   293.15    │                                         │
-│    Pressure [Torr]   760       │                                         │
-│    Gas file  [ar_70…gas] […]  │                                         │
-│    Penning  [✓]  ncoll  10     │                                         │
-│    W-value [eV]  26.0          │                                         │
-│  ▼ Simulation                  │                                         │
-│    Events         1000         │                                         │
-│    Max aval. size 500000       │                                         │
-│    Time window [ns] 300        │                                         │
-│    Time step [ns]   0.5        │                                         │
-│  ▼ Output                      │                                         │
-│    Directory  [results/] […]   │                                         │
-└────────────────────────────────┴─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│  TGC Simulation          [▶ Run]  [■ Stop]  [Load Config]  [Save Config]                │
+├─────────────────────────────────┬───────────────────────────────────────────────────────┤
+│  ▼ Geometry                     │  [ Log | Summary | Plots | Waveforms |                │
+│    Wire pitch [cm]   0.18       │    Charge | E-Field | 3D Tracks ]                     │
+│    Wire diameter [μm] 50        │                                                       │
+│    Gap [cm]          0.14       │  ← live output / results shown here                   │
+│    N wires           10         │                                                       │
+│    Wire voltage [V]  1900       │                                                       │
+│  ▼ Readout                      │                                                       │
+│    Type        [Conductive ▼]   │                                                       │
+│    (Insulator  [Kapton ▼])      │                                                       │
+│    (Thickness  100 μm)          │                                                       │
+│    (Resistivity 500 kΩ/sq)      │                                                       │
+│  ▼ Source                       │                                                       │
+│    Energy [keV]      5.9        │                                                       │
+│    Distances [mm]  0.2,0.5,…   │                                                       │
+│    X position  [✓ Random]       │                                                       │
+│      fixed x [cm]  [0.0,0.18,…]│  ← comma-separated; one run per value                 │
+│  ▼ Gas                          │                                                       │
+│    Temperature [K]   293.15     │                                                       │
+│    Pressure [Torr]   760        │                                                       │
+│    Gas file  [ar_70…gas] […]   │                                                       │
+│    Penning  [✓]  ncoll  10      │                                                       │
+│    W-value [eV]  26.0           │                                                       │
+│  ▼ Simulation                   │                                                       │
+│    Events         1000          │                                                       │
+│    Max aval. size 500000        │                                                       │
+│    Time window [ns] 300         │                                                       │
+│    Time step [ns]   0.5         │                                                       │
+│  ▼ Output                       │                                                       │
+│    Directory  [results/] […]    │                                                       │
+└─────────────────────────────────┴───────────────────────────────────────────────────────┘
 ```
 
 | Tab | Contents |
@@ -359,10 +360,17 @@ been built yet, the window opens with a warning in the title bar.
 | **Summary** | Table from `summary.csv` — one row per source distance |
 | **Plots** | 2 × 2 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, charge ratio, and avalanche size vs source distance (with SEM error bars) |
 | **Waveforms** | Mean anode and cathode current waveforms overlaid per distance, read directly from the ROOT file via uproot |
+| **Charge** | Integrated charge histograms (Q_anode, Q_cathode) per source distance, read from the ROOT file |
+| **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
+| **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (10 %), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent hexagonal tube wireframes at actual diameter; primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
 
 **▶ Run** starts the simulation in a background thread (the window stays fully
 responsive).  **■ Stop** sends SIGTERM.  **Load Config** / **Save Config** read and
 write `.json` files that are fully compatible with the CLI `--config` flag.
+
+> **Note:** The E-Field and 3D Tracks tabs open ROOT TCanvas windows and require
+> PyROOT (ROOT importable from Python — available automatically when using the
+> conda ROOT installation described in the Build section above).
 
 ---
 
@@ -396,7 +404,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 |-----------------------|---------------|------|----------------------|-----------------------------------------------------------|
 | `energy_keV`          | float         | keV  | 5.9                  | Photon energy of the simulated X-ray source (Fe-55 K-alpha line). Determines the number of primary electrons via `N = round(E_photon[eV] / w_value_eV)` (≈227 for Fe-55 at 5.9 keV and W = 26 eV) |
 | `source_distances_mm` | float array   | mm   | [0.2, 0.5, 0.9, 1.2] | List of signed y-positions (mm) at which primary electrons are placed, measured from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). Each distance is a separate simulation run. Values are clamped to (−`gap_cm`×10, +`gap_cm`×10) |
-| `x_position_cm`       | float or null | cm   | null                 | Fixed lateral (x) position for the photon interaction point. `null` draws a uniform random position over the wire array each event, averaging over the wire-gap geometry. Set to a specific value to study a fixed impact point (e.g. directly above a wire vs. midgap) |
+| `x_positions_cm`      | float array or null | cm | null           | Comma-separated list of fixed lateral (x) positions [cm] for the photon interaction point. `null` → uniform random over the wire array each event. One or more values → one simulation run per distance × x-position pair; ROOT directory named `dist_Nmm_xMmm/`. Backward-compatible with the old scalar `x_position_cm` key (wrapped into a one-element list) |
 
 ### `gas`
 
@@ -420,6 +428,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `time_window_ns`     | float | ns   | 300.0    | Duration of the induced-current waveform recorded on each electrode. 300 ns captures the full electron component (collected in ≲20 ns) and the first ~34 % of the slow ion tail (~8 μs total) |
 | `time_step_ns`       | float | ns   | 0.5      | Width of each time bin in the `TProfile` waveforms (`p_anode_signal`, `p_cathode_signal`). Finer bins give better time resolution but larger ROOT histograms. 0.5 ns is sufficient to resolve the fast electron peak (~5–10 ns FWHM) |
 | `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
+| `store_drift_lines`  | bool  | —    | false    | When `true`, `AvalancheMicroscopic` records every intermediate collision step in the primary electron drift line (not just start and end), producing denser 3D path data for the GUI 3D Tracks viewer at the cost of larger ROOT files |
 
 ---
 
@@ -429,8 +438,17 @@ All output is written to `<out_dir>/V<voltage>V__n<n_events>/`.
 
 ### ROOT file (`tgc_sim.root`)
 
-The ROOT file contains one subdirectory per source distance (e.g. `dist_0p7mm/`) and a
-`summary/` directory.
+The ROOT file contains one subdirectory per (distance, x-position) combination and a
+`summary/` directory.  Directory naming:
+
+| Condition | Example name |
+|-----------|-------------|
+| `x_positions_cm: null` (random x) | `dist_0p7mm/` |
+| `x_positions_cm: [0.0]` | `dist_0p7mm_x0mm/` |
+| `x_positions_cm: [0.0, 0.18]` | `dist_0p7mm_x0mm/`, `dist_0p7mm_x1p8mm/` |
+
+The x-position suffix uses millimetres (× 10 relative to the cm config value) with
+decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).
 
 **Per-distance histograms:**
 

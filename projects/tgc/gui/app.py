@@ -231,15 +231,16 @@ class ConfigPanel(QScrollArea):
 
         self.x_random = QCheckBox("Random (uniform over wire span)")
         self.x_random.setChecked(True)
-        self.x_pos = self._dspin(-10.0, 10.0, 0.01, 3, 0.0)
-        self.x_pos.setEnabled(False)
-        self.x_pos.setToolTip("Fixed photon x-position [cm]")
-        self.x_random.toggled.connect(lambda on: self.x_pos.setEnabled(not on))
+        self.x_positions = QLineEdit("0.0")
+        self.x_positions.setEnabled(False)
+        self.x_positions.setToolTip(
+            "Comma-separated fixed x-positions [cm] (e.g. 0.0, 0.09, 0.18)")
+        self.x_random.toggled.connect(lambda on: self.x_positions.setEnabled(not on))
 
         src_form.addRow("Energy [keV]",   self.energy_kev)
         src_form.addRow("Distances [mm]", self.distances)
         src_form.addRow("X position",     self.x_random)
-        src_form.addRow("  fixed x [cm]", self.x_pos)
+        src_form.addRow("  fixed x [cm]", self.x_positions)
         root_layout.addWidget(src_box)
 
         # ── Gas ───────────────────────────────────────────────────────────
@@ -452,7 +453,14 @@ class ConfigPanel(QScrollArea):
         except ValueError:
             dists = [0.7]
 
-        x_pos = None if self.x_random.isChecked() else self.x_pos.value()
+        if self.x_random.isChecked():
+            x_positions = None
+        else:
+            raw_x = self.x_positions.text().strip()
+            try:
+                x_positions = [float(v.strip()) for v in raw_x.split(",") if v.strip()]
+            except ValueError:
+                x_positions = [0.0]
 
         ro_type = self.readout_type.currentText().lower()
         ins_mat = self.insulator_material.currentText().lower()
@@ -475,7 +483,7 @@ class ConfigPanel(QScrollArea):
             "source": {
                 "energy_keV":          self.energy_kev.value(),
                 "source_distances_mm": dists,
-                "x_position_cm":       x_pos,
+                "x_positions_cm":      x_positions,
             },
             "gas": {
                 "temperature_K":          self.temperature.value(),
@@ -519,12 +527,16 @@ class ConfigPanel(QScrollArea):
         self.energy_kev.setValue(s.get("energy_keV", 5.9))
         dists = s.get("source_distances_mm", [0.2, 0.5, 0.9, 1.2])
         self.distances.setText(",".join(str(v) for v in dists))
-        x_pos = s.get("x_position_cm", None)
-        if x_pos is None:
+        x_positions = s.get("x_positions_cm", None)
+        if x_positions is None:
+            # backward compat: old scalar key
+            scalar = s.get("x_position_cm", None)
+            x_positions = [float(scalar)] if scalar is not None else None
+        if x_positions is None:
             self.x_random.setChecked(True)
         else:
             self.x_random.setChecked(False)
-            self.x_pos.setValue(float(x_pos))
+            self.x_positions.setText(",".join(str(v) for v in x_positions))
 
         gas = d.get("gas", {})
         self.temperature.setValue(gas.get("temperature_K", 293.15))
@@ -597,11 +609,16 @@ class ResultsPanel(QTabWidget):
         self._root_objects: list = []  # TGraph/TLegend objects (prevent Python GC)
         self._charge_canvas  = None   # ROOT TCanvas for charge integrals
         self._charge_objects: list = []
-        self._track_data:   dict = {}  # label → dict of numpy object arrays
+        self._track_data:   dict = {}  # {dist_label: {xpos_label: data_dict}}
         self._track_geom:   dict | None = None
         self._tracks_canvas  = None   # ROOT TCanvas for 3D tracks
         self._tracks_objects: list = []
-        self._trk_view: object = None  # TView3D captured at draw time
+        self._trk_zoom_scale: float = 1.0   # <1 zoomed in, >1 zoomed out
+        self._trk_view_phi:   float = 30.0  # TPad azimuthal angle (ROOT default)
+        self._trk_view_theta: float = 30.0  # TPad elevation angle (ROOT default)
+        self._trk_pan_x:      float = 0.0   # cm offset of X visible centre
+        self._trk_pan_y:      float = 0.0   # cm offset of Y visible centre
+        self._trk_pan_z:      float = 0.0   # cm offset of Z visible centre
         self._efield_cache: dict | None = None   # {x, y, Ex, Ey} computed arrays
         self._efield_root_canvas  = None   # ROOT TCanvas for E-field maps
         self._efield_objects: list = []
@@ -710,7 +727,11 @@ class ResultsPanel(QTabWidget):
         trk_sel_h.addWidget(QLabel("Distance:"))
         self.trk_dist_combo = QComboBox()
         trk_sel_h.addWidget(self.trk_dist_combo)
-        trk_sel_h.addSpacing(16)
+        trk_sel_h.addSpacing(12)
+        trk_sel_h.addWidget(QLabel("X pos:"))
+        self.trk_xpos_combo = QComboBox()
+        trk_sel_h.addWidget(self.trk_xpos_combo)
+        trk_sel_h.addSpacing(12)
         trk_sel_h.addWidget(QLabel("Event:"))
         self.trk_event_slider = QSlider(Qt.Horizontal)
         self.trk_event_slider.setMinimum(0)
@@ -731,16 +752,17 @@ class ResultsPanel(QTabWidget):
         trk_ctrl_h   = QHBoxLayout(trk_ctrl_row)
         trk_ctrl_h.setContentsMargins(0, 0, 0, 0)
 
-        for _label, _lon, _lat in [
-            ("Gap XY",  90,  0),   # along Y → sees X-Z (track vs wire)
-            ("Top XZ",  90, 90),   # from above → sees X-Y (gap cross-section)
-            ("Side YZ",  0,  0),   # along X → sees Y-Z (gap + drift)
-            ("3D",      30, 30),   # default perspective
+        for _label, _phi, _theta, _rz in [
+            ("Gap XY",   0,  90, False),  # theta=90 → camera along Z → sees X-Y
+            ("Top XZ",  90,   0, False),  # phi=90  → camera along Y → sees X-Z
+            ("Side YZ",  0,   0, False),  # phi=0   → camera along X → sees Y-Z
+            ("3D",      30,  30, True),   # default perspective + reset zoom
         ]:
             _btn = QPushButton(_label)
             _btn.setMaximumWidth(72)
             _btn.clicked.connect(
-                (lambda lo, la: lambda: self._trk_setview(lo, la))(_lon, _lat))
+                (lambda p, t, rz: lambda: self._trk_preset_view(p, t, rz))
+                (_phi, _theta, _rz))
             trk_ctrl_h.addWidget(_btn)
 
         trk_ctrl_h.addSpacing(16)
@@ -748,16 +770,34 @@ class ResultsPanel(QTabWidget):
         trk_zoom_out_btn = QPushButton("Zoom −")
         trk_zoom_in_btn.setMaximumWidth(65)
         trk_zoom_out_btn.setMaximumWidth(65)
-        trk_zoom_in_btn.clicked.connect(lambda: self._trk_zoom(True))
-        trk_zoom_out_btn.clicked.connect(lambda: self._trk_zoom(False))
+        trk_zoom_in_btn.clicked.connect(lambda: self._trk_adjust_zoom(0.7))
+        trk_zoom_out_btn.clicked.connect(lambda: self._trk_adjust_zoom(1.0 / 0.7))
         trk_ctrl_h.addWidget(trk_zoom_in_btn)
         trk_ctrl_h.addWidget(trk_zoom_out_btn)
         trk_ctrl_h.addStretch()
         tracks_layout.addWidget(trk_ctrl_row)
 
+        # — pan controls —
+        trk_pan_row = QWidget()
+        trk_pan_h   = QHBoxLayout(trk_pan_row)
+        trk_pan_h.setContentsMargins(0, 0, 0, 0)
+        trk_pan_h.addWidget(QLabel("Pan:"))
+        for _ax, _d, _lbl in [
+            ("x", -1, "X-"), ("x", +1, "X+"),
+            ("y", -1, "Y-"), ("y", +1, "Y+"),
+            ("z", -1, "Z-"), ("z", +1, "Z+"),
+        ]:
+            _btn = QPushButton(_lbl)
+            _btn.setMaximumWidth(42)
+            _btn.clicked.connect(
+                (lambda a, d: lambda: self._trk_pan(a, d))(_ax, _d))
+            trk_pan_h.addWidget(_btn)
+        trk_pan_h.addStretch()
+        tracks_layout.addWidget(trk_pan_row)
+
         trk_hint = QLabel(
             "ROOT canvas opens automatically when results are loaded.\n"
-            "Left-click drag: rotate  ·  Zoom ± / view buttons above  ·  Right-click: save."
+            "Left-click drag: rotate  ·  Zoom / Pan / View buttons above  ·  Right-click: save."
         )
         trk_hint.setWordWrap(True)
         trk_hint.setStyleSheet("color: grey; font-size: 11px;")
@@ -765,6 +805,7 @@ class ResultsPanel(QTabWidget):
         tracks_layout.addStretch()
 
         self.trk_dist_combo.currentIndexChanged.connect(self._on_trk_dist_changed)
+        self.trk_xpos_combo.currentIndexChanged.connect(self._on_trk_xpos_changed)
         self.trk_event_slider.sliderReleased.connect(self._update_track_plot)
 
         self.addTab(tracks_widget, "3D Tracks")
@@ -1238,9 +1279,17 @@ class ResultsPanel(QTabWidget):
 
         self._track_data.clear()
         self._track_geom = None
-        self._tracks_canvas = None   # force recreation for the new run
+        self._tracks_canvas  = None   # force recreation for the new run
+        self._trk_zoom_scale = 1.0
+        self._trk_view_phi   = 30.0
+        self._trk_view_theta = 30.0
+        self._trk_pan_x = 0.0
+        self._trk_pan_y = 0.0
+        self._trk_pan_z = 0.0
         self.trk_dist_combo.blockSignals(True)
         self.trk_dist_combo.clear()
+        self.trk_xpos_combo.blockSignals(True)
+        self.trk_xpos_combo.clear()
 
         # Geometry comes from run_config.json written by the binary
         cfg_path = Path(run_dir) / "run_config.json"
@@ -1277,17 +1326,22 @@ class ResultsPanel(QTabWidget):
 
         try:
             with uproot.open(root_path) as f:
-                dist_keys = sorted({
+                # Folder names: dist_0p1mm_x0p18mm  (or dist_0p1mm for old files)
+                all_keys = sorted({
                     k.split("/")[0] for k in f.keys(cycle=False)
                     if k.split("/")[0].startswith("dist_")
                 })
-                for key in dist_keys:
-                    label = key.removeprefix("dist_").replace("p", ".").replace("mm", " mm")
+                for key in all_keys:
+                    rest = key.removeprefix("dist_")
+                    dist_raw, sep, xpos_raw = rest.partition("_x")
+                    dist_label = dist_raw.replace("p", ".").replace("mm", " mm")
+                    xpos_label = (xpos_raw.replace("p", ".").replace("mm", " mm")
+                                  if sep else "—")
                     try:
                         tree = f[f"{key}/t_signals"]
                         if "primary_x" not in tree.keys():
                             continue   # pre-feature ROOT file — skip silently
-                        self._track_data[label] = {
+                        data_dict = {
                             "primary_x": tree["primary_x"].array(library="np"),
                             "primary_y": tree["primary_y"].array(library="np"),
                             "primary_z": tree["primary_z"].array(library="np"),
@@ -1299,20 +1353,38 @@ class ResultsPanel(QTabWidget):
                             "ion_z":     tree["ion_z"].array(library="np"),
                             "ion_npts":  tree["ion_npts"].array(library="np"),
                         }
-                        self.trk_dist_combo.addItem(label)
+                        self._track_data.setdefault(dist_label, {})[xpos_label] = data_dict
+                        if self.trk_dist_combo.findText(dist_label) == -1:
+                            self.trk_dist_combo.addItem(dist_label)
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Track load error for {key}: {exc}")
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file for tracks: {exc}")
 
         self.trk_dist_combo.blockSignals(False)
+        self.trk_xpos_combo.blockSignals(False)
         if self.trk_dist_combo.count():
             self._on_trk_dist_changed(0)
             self._root_timer.start()   # keep tracks window responsive
 
     def _on_trk_dist_changed(self, index: int):
-        label = self.trk_dist_combo.currentText()
-        data  = self._track_data.get(label)
+        dist_label = self.trk_dist_combo.currentText()
+        xpos_dict  = self._track_data.get(dist_label, {})
+
+        self.trk_xpos_combo.blockSignals(True)
+        self.trk_xpos_combo.clear()
+        for xpos_label in sorted(
+                xpos_dict.keys(),
+                key=lambda s: float(s.replace(" mm", "")) if s != "—" else 0.0):
+            self.trk_xpos_combo.addItem(xpos_label)
+        self.trk_xpos_combo.blockSignals(False)
+
+        self._on_trk_xpos_changed(0)
+
+    def _on_trk_xpos_changed(self, index: int):
+        dist_label = self.trk_dist_combo.currentText()
+        xpos_label = self.trk_xpos_combo.currentText()
+        data = self._track_data.get(dist_label, {}).get(xpos_label)
         if data is None:
             return
         n = len(data["primary_x"])
@@ -1325,10 +1397,12 @@ class ResultsPanel(QTabWidget):
 
     def _update_track_plot(self):
         """Render detector geometry and per-event tracks in a ROOT TCanvas."""
-        label = self.trk_dist_combo.currentText()
-        data  = self._track_data.get(label)
+        dist_label = self.trk_dist_combo.currentText()
+        xpos_label = self.trk_xpos_combo.currentText()
+        data = self._track_data.get(dist_label, {}).get(xpos_label)
         if data is None:
             return
+        label = f"{dist_label}  x={xpos_label}" if xpos_label != "—" else dist_label
 
         ev = self.trk_event_slider.value()
         n  = len(data["primary_x"])
@@ -1338,9 +1412,14 @@ class ResultsPanel(QTabWidget):
         pitch   = geom.get("wire_pitch_cm", 0.18)
         n_wires = int(geom.get("n_wires", 10))
         gap     = geom.get("gap_cm", 0.14)
+        wire_diam_um = geom.get("wire_diam_um", 50.0)
+        r_cm    = wire_diam_um / 2.0 * 1e-4   # µm → cm (actual physical radius)
         z_half  = 0.5
         x_half  = (n_wires - 1) / 2.0 * pitch + pitch
         x_wires = [(i - (n_wires - 1) / 2.0) * pitch for i in range(n_wires)]
+        # largest physical half-range across all axes → equal TH3F ranges for
+        # correct aspect ratios in ROOT's classic 3D renderer
+        max_half = max(x_half, gap * 1.2, z_half)
 
         try:
             import ROOT  # noqa: PLC0415
@@ -1352,34 +1431,69 @@ class ResultsPanel(QTabWidget):
                 self._tracks_canvas = ROOT.TCanvas(
                     "tgc_tracks", "TGC 3D Tracks", 900, 700)
 
-            self._trk_view = None   # reset BEFORE Clear so no dangling C++ pointer
             self._tracks_canvas.cd()
             self._tracks_canvas.Clear()
             self._tracks_objects.clear()
+            self._tracks_canvas.SetPhi(self._trk_view_phi)
+            self._tracks_canvas.SetTheta(self._trk_view_theta)
 
             # TH3F frame — defines axes and 3D coordinate range
+            s  = self._trk_zoom_scale
+            px = self._trk_pan_x
+            py = self._trk_pan_y
+            pz = self._trk_pan_z
             frame = ROOT.TH3F(
                 "trk_frame",
-                f"TGC 3D Tracks — {label}, event {ev + 1};"
+                f"TGC 3D Tracks - {label}, event {ev + 1};"
                 "x [cm];y [cm];z [cm]",
-                1, -x_half, x_half,
-                1, -gap * 1.2, gap * 1.2,
-                1, -z_half, z_half,
+                1, px - max_half * s, px + max_half * s,
+                1, py - max_half * s, py + max_half * s,
+                1, pz - max_half * s, pz + max_half * s,
             )
             frame.SetStats(0)
             frame.Draw()
             self._tracks_objects.append(frame)
 
-            def _pl3(xs, ys, zs, color, width=1):
+            def _clip(xs, ys, zs):
+                """Return contiguous sub-segments whose points lie within the
+                visible cube [centre ± max_half*s].  Point-mask only — no exact
+                boundary intersection, but avoids drawing far outside the frame."""
+                hr = max_half * s
+                cx_ = self._trk_pan_x
+                cy_ = self._trk_pan_y
+                cz_ = self._trk_pan_z
+                mask = ((xs >= cx_ - hr) & (xs <= cx_ + hr) &
+                        (ys >= cy_ - hr) & (ys <= cy_ + hr) &
+                        (zs >= cz_ - hr) & (zs <= cz_ + hr))
+                segs, i, n = [], 0, len(xs)
+                while i < n:
+                    if mask[i]:
+                        j = i + 1
+                        while j < n and mask[j]:
+                            j += 1
+                        if j - i >= 2:
+                            segs.append((xs[i:j], ys[i:j], zs[i:j]))
+                        i = j
+                    else:
+                        i += 1
+                return segs
+
+            def _pl3(xs, ys, zs, color, width=1, alpha=1.0):
                 ln = ROOT.TPolyLine3D(
                     len(xs), xs.astype("f4"), ys.astype("f4"), zs.astype("f4"))
-                ln.SetLineColor(color)
+                if alpha < 1.0:
+                    ln.SetLineColorAlpha(color, alpha)
+                else:
+                    ln.SetLineColor(color)
                 ln.SetLineWidth(width)
                 ln.Draw("SAME")
                 self._tracks_objects.append(ln)
 
             # ── Cathode planes (rectangular outlines) ─────────────────────────
+            _hr = max_half * s
             for y_cath, color in [(-gap, ROOT.kCyan - 7), (gap, ROOT.kYellow - 7)]:
+                if not (self._trk_pan_y - _hr <= y_cath <= self._trk_pan_y + _hr):
+                    continue
                 cx = np.array([-x_half, x_half, x_half, -x_half, -x_half], "f4")
                 cy = np.full(5, y_cath, "f4")
                 cz = np.array([-z_half, -z_half, z_half, z_half, -z_half], "f4")
@@ -1389,17 +1503,44 @@ class ResultsPanel(QTabWidget):
                 pl.Draw("SAME")
                 self._tracks_objects.append(pl)
 
-            # ── Anode wires ───────────────────────────────────────────────────
+            # ── Anode wires (cylinder wireframe, actual diameter, semi-transparent) ──
+            _wire_alpha = 0.45
+            _n_sides = 6                                      # hexagonal approximation
+            _angles = np.linspace(0.0, 2.0 * np.pi, _n_sides + 1)  # closed polygon
             for x_w in x_wires:
-                _pl3(np.array([x_w, x_w]), np.zeros(2),
-                     np.array([-z_half, z_half]), ROOT.kYellow + 1, 2)
+                if not (self._trk_pan_x - _hr <= x_w <= self._trk_pan_x + _hr):
+                    continue
+                xs_c = (x_w + r_cm * np.cos(_angles)).astype("f4")
+                ys_c = (r_cm * np.sin(_angles)).astype("f4")
+                # two end rings
+                for z_end in (-z_half, z_half):
+                    zs_c = np.full(_n_sides + 1, z_end, "f4")
+                    ring = ROOT.TPolyLine3D(_n_sides + 1, xs_c, ys_c, zs_c)
+                    ring.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
+                    ring.SetLineWidth(1)
+                    ring.Draw("SAME")
+                    self._tracks_objects.append(ring)
+                # six longitudinal edges
+                for _a in _angles[:-1]:
+                    _xe = float(x_w + r_cm * np.cos(_a))
+                    _ye = float(r_cm * np.sin(_a))
+                    ln = ROOT.TPolyLine3D(
+                        2,
+                        np.array([_xe, _xe], "f4"),
+                        np.array([_ye, _ye], "f4"),
+                        np.array([-z_half, z_half], "f4"),
+                    )
+                    ln.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
+                    ln.SetLineWidth(1)
+                    ln.Draw("SAME")
+                    self._tracks_objects.append(ln)
 
             # ── Primary electron drift (blue) ─────────────────────────────────
             px = np.asarray(data["primary_x"][ev])
             py = np.asarray(data["primary_y"][ev])
             pz = np.asarray(data["primary_z"][ev])
-            if len(px) >= 2:
-                _pl3(px, py, pz, ROOT.kBlue + 1, 2)
+            for _seg in _clip(px, py, pz):
+                _pl3(*_seg, ROOT.kBlue + 1, 2, alpha=0.65)
 
             # ── Avalanche cloud (orange markers) ──────────────────────────────
             cx_ = np.asarray(data["cloud_x"][ev])
@@ -1409,7 +1550,7 @@ class ResultsPanel(QTabWidget):
                 p = np.empty(3 * len(cx_), "f4")
                 p[0::3] = cx_; p[1::3] = cy_; p[2::3] = cz_
                 mrk = ROOT.TPolyMarker3D(len(cx_), p, 7)
-                mrk.SetMarkerColor(ROOT.kOrange + 1)
+                mrk.SetMarkerColorAlpha(ROOT.kOrange + 1, 0.50)
                 mrk.SetMarkerSize(0.4)
                 mrk.Draw("SAME")
                 self._tracks_objects.append(mrk)
@@ -1426,7 +1567,15 @@ class ResultsPanel(QTabWidget):
                 ys = ion_y[off:off + n_seg]
                 zs = ion_z[off:off + n_seg]
                 off += n_seg
-                if len(ys) == 0:
+                if len(ys) < 2:
+                    # single start-point: ion immediately absorbed — draw as marker
+                    if len(ys) == 1:
+                        pt = np.array([float(xs[0]), float(ys[0]), float(zs[0])], "f4")
+                        dot = ROOT.TPolyMarker3D(1, pt, 7)
+                        dot.SetMarkerColorAlpha(ROOT.kGray + 2, 0.5)
+                        dot.SetMarkerSize(0.3)
+                        dot.Draw("SAME")
+                        self._tracks_objects.append(dot)
                     continue
                 y_end = float(ys[-1])
                 if abs(y_end - (-gap)) <= tol:
@@ -1435,46 +1584,42 @@ class ResultsPanel(QTabWidget):
                     col = ROOT.kMagenta      # → non-readout cathode
                 else:
                     col = ROOT.kGray + 1     # absorbed / out of window
-                _pl3(xs, ys, zs, col, 1)
+                for _seg in _clip(xs, ys, zs):
+                    _pl3(*_seg, col, 1, alpha=0.55)
 
             self._tracks_canvas.Update()
-            self._trk_view = self._tracks_canvas.GetView()  # TView3D exists after paint
 
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] ROOT 3D tracks error: {exc}")
 
-    def _trk_zoom(self, zoom_in: bool) -> None:
-        """Zoom the ROOT 3D tracks canvas using the stored TView3D reference."""
-        if self._trk_view is None:
-            return
-        if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
-            self._trk_view = None
-            return
-        try:
-            import ROOT  # noqa: PLC0415
-            self._tracks_canvas.cd()    # gPad must equal this canvas for ZoomIn/Out
-            self._trk_view.ZoomIn() if zoom_in else self._trk_view.ZoomOut()
-            # ZoomIn/ZoomOut call gPad.Modified() + gPad.Update() internally
-        except Exception:  # noqa: BLE001
-            pass
+    def _trk_adjust_zoom(self, factor: float) -> None:
+        """Scale the visible axis range and redraw (factor < 1 = zoom in)."""
+        self._trk_zoom_scale = max(0.05, min(20.0, self._trk_zoom_scale * factor))
+        self._update_track_plot()
 
-    def _trk_setview(self, lon: float, lat: float) -> None:
-        """Snap the ROOT 3D tracks view to a preset orientation."""
-        if self._trk_view is None:
-            return
-        if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
-            self._trk_view = None
-            return
-        try:
-            import ROOT  # noqa: PLC0415
-            from array import array
-            self._tracks_canvas.cd()
-            irep = array('i', [0])      # Int_t & output required by SetView
-            self._trk_view.SetView(lon, lat, 0.0, irep)
-            self._tracks_canvas.Modified()
-            self._tracks_canvas.Update()
-        except Exception:  # noqa: BLE001
-            pass
+    def _trk_pan(self, axis: str, direction: int) -> None:
+        """Shift the visible centre by 30 % of the current visible half-range."""
+        geom    = self._track_geom or {}
+        pitch   = geom.get("wire_pitch_cm", 0.18)
+        n_wires = int(geom.get("n_wires", 10))
+        gap     = geom.get("gap_cm", 0.14)
+        x_half  = (n_wires - 1) / 2.0 * pitch + pitch
+        max_half = max(x_half, gap * 1.2, 0.5)   # matches equal-range TH3F
+        step = max_half * self._trk_zoom_scale * 0.3 * direction
+        if   axis == "x": self._trk_pan_x += step
+        elif axis == "y": self._trk_pan_y += step
+        else:             self._trk_pan_z += step
+        self._update_track_plot()
+
+    def _trk_preset_view(self, phi: float, theta: float,
+                         reset_zoom: bool = False) -> None:
+        """Set pad view angles and redraw."""
+        self._trk_view_phi   = phi
+        self._trk_view_theta = theta
+        if reset_zoom:
+            self._trk_zoom_scale = 1.0
+            self._trk_pan_x = self._trk_pan_y = self._trk_pan_z = 0.0
+        self._update_track_plot()
 
     # ── E-Field ────────────────────────────────────────────────────────────────
 

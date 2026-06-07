@@ -9,7 +9,7 @@
   "source": {
     "energy_keV": 5.9,
     "source_distances_mm": [0.7],
-    "x_position_cm": null
+    "x_positions_cm": null
   },
   "gas": {
     "temperature_K": 293.15,

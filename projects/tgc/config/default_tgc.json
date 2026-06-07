@@ -15,24 +15,28 @@
   },
   "source": {
     "energy_keV": 5.9,
-    "source_distances_mm": [0.7],
-    "x_position_cm": null
+    "source_distances_mm": [
+      -0.7,
+      0.7
+    ],
+    "x_positions_cm": null
   },
   "gas": {
     "temperature_K": 293.15,
     "pressure_Torr": 760.0,
     "enable_penning": true,
     "n_magboltz_collisions": 10,
+    "w_value_eV": 26.0,
     "max_electron_energy_eV": 2000.0,
     "n_field_points": 20,
-    "e_field_max_vcm": 400000.0,
-    "w_value_eV": 26.0
+    "e_field_max_vcm": 400000.0
   },
   "simulation": {
-    "n_events": 1000,
+    "n_events": 1,
     "max_avalanche_size": 500000,
-    "time_window_ns": 10000.0,
+    "time_window_ns": 40000.0,
     "time_step_ns": 0.5,
-    "enable_ion_drift": true
+    "enable_ion_drift": true,
+    "store_drift_lines": false
   }
 }

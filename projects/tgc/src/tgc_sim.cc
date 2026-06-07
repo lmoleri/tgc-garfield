@@ -95,7 +95,7 @@ struct ReadoutConfig {
 struct SourceConfig {
   double energyKeV                     = 5.9;
   std::vector<double> distancesMm      = {0.2, 0.5, 0.9, 1.2};
-  std::optional<double> fixedXCm;      // nullopt → uniform random over wire span
+  std::optional<std::vector<double>> fixedXCmList;  // nullopt → uniform random over wire span
 };
 
 struct GasConfig {
@@ -119,7 +119,7 @@ struct SimulationConfig {
 };
 
 // ─── 3D-visualisation display limits ─────────────────────────────────────────
-constexpr std::size_t kMaxDispIonPaths = 20;   // ion drift paths saved per event
+constexpr std::size_t kMaxDispIonPaths = 100;  // ion drift paths saved per event
 constexpr std::size_t kMaxDispCloudPts = 500;  // avalanche-cloud points saved per event
 
 struct Config {
@@ -383,10 +383,16 @@ Config LoadConfig(const fs::path& path) {
   if (const auto* s = FindSection(root, "source")) {
     cfg.source.energyKeV    = ReadDouble(*s, "source", "energy_keV", cfg.source.energyKeV);
     cfg.source.distancesMm  = ReadDoubleArray(*s, "source", "source_distances_mm", cfg.source.distancesMm);
-    auto* xp = FindMember(*s, "x_position_cm", {"source", "x_position_cm"});
-    if (xp && !xp->is_null()) {
-      if (!xp->is_number()) ThrowJsonTypeError({"source", "x_position_cm"}, "a number or null");
-      cfg.source.fixedXCm = xp->get<double>();
+    auto* xpList = FindMember(*s, "x_positions_cm", {"source", "x_positions_cm"});
+    if (xpList && xpList->is_array()) {
+      cfg.source.fixedXCmList = std::vector<double>{};
+      for (auto& v : *xpList)
+        cfg.source.fixedXCmList->push_back(v.get<double>());
+    } else {
+      // backward compat: old scalar x_position_cm key
+      auto* xp = FindMember(*s, "x_position_cm", {"source", "x_position_cm"});
+      if (xp && xp->is_number())
+        cfg.source.fixedXCmList = std::vector<double>{xp->get<double>()};
     }
   }
 
@@ -614,7 +620,8 @@ void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
 DistanceSummary RunDistancePoint(const Config& cfg,
                                  double sourceDistanceMm,
                                  Sensor& sensor,
-                                 TDirectory* distDir) {
+                                 TDirectory* distDir,
+                                 std::optional<double> fixedXCm = std::nullopt) {
   const auto& geom = cfg.geometry;
   const auto& sim  = cfg.simulation;
 
@@ -724,8 +731,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   for (std::size_t ev = 0; ev < sim.nEvents; ++ev) {
     sensor.ClearSignal();
 
-    const double x0 = cfg.source.fixedXCm.has_value()
-                          ? *cfg.source.fixedXCm
+    const double x0 = fixedXCm.has_value()
+                          ? *fixedXCm
                           : gRandom->Uniform(-xHalfWires, xHalfWires);
 
     // Transport one representative electron from (x0, y0, 0) and scale all results
@@ -1017,8 +1024,8 @@ json ConfigToJson(const Config& cfg) {
     {"energy_keV",           cfg.source.energyKeV},
     {"source_distances_mm",  cfg.source.distancesMm}
   };
-  jSrc["x_position_cm"] = cfg.source.fixedXCm.has_value()
-                               ? json(*cfg.source.fixedXCm)
+  jSrc["x_positions_cm"] = cfg.source.fixedXCmList.has_value()
+                               ? json(*cfg.source.fixedXCmList)
                                : json(nullptr);
   return {
     {"geometry", {
@@ -1109,7 +1116,11 @@ int main(int argc, char* argv[]) {
               << "  gas     : Ar:CO2 70:30, " << cfg.gas.temperatureK << " K, "
               << cfg.gas.pressureTorr << " Torr\n"
               << "  source  : " << cfg.source.energyKeV << " keV, "
-              << cfg.source.distancesMm.size() << " distance point(s)\n"
+              << cfg.source.distancesMm.size() << " distance point(s)"
+              << (cfg.source.fixedXCmList.has_value()
+                    ? (", " + std::to_string(cfg.source.fixedXCmList->size()) + " x-position(s)")
+                    : std::string(", x random"))
+              << "\n"
               << "  events  : " << cfg.simulation.nEvents << " per point\n";
 
     // Sanity-check gas.e_field_max_vcm against the estimated peak near-wire field.
@@ -1159,32 +1170,50 @@ int main(int argc, char* argv[]) {
 
     std::vector<DistanceSummary> allSummaries;
 
+    // Build flat list of (optional) x-positions to iterate:
+    //   nullopt  → pick uniform random x per event  (no _x suffix in directory name)
+    //   value    → fixed x for all events in that directory
+    std::vector<std::optional<double>> xList;
+    if (cfg.source.fixedXCmList.has_value() && !cfg.source.fixedXCmList->empty()) {
+      for (double x : *cfg.source.fixedXCmList)
+        xList.push_back(x);
+    } else {
+      xList.push_back(std::nullopt);  // random per event
+    }
+
     for (const double distMm : cfg.source.distancesMm) {
-      std::cout << "\n--- Source distance: " << FormatNumber(distMm) << " mm ---\n";
+      for (const auto& xOpt : xList) {
+        std::string label = FormatNumber(distMm) + " mm";
+        if (xOpt.has_value())
+          label += "  x=" + FormatNumber(*xOpt * 10.0) + " mm";
+        std::cout << "\n--- Source distance: " << label << " ---\n";
 
-      const std::string tag = "dist_" + FileSafeNumber(distMm) + "mm";
-      TDirectory* distDir = rootFile.mkdir(tag.c_str());
-      if (!distDir) throw std::runtime_error("Failed to create ROOT dir: " + tag);
+        std::string tag = "dist_" + FileSafeNumber(distMm) + "mm";
+        if (xOpt.has_value())
+          tag += "_x" + FileSafeNumber(*xOpt * 10.0) + "mm";  // cm → mm for name
+        TDirectory* distDir = rootFile.mkdir(tag.c_str());
+        if (!distDir) throw std::runtime_error("Failed to create ROOT dir: " + tag);
 
-      DistanceSummary summary = RunDistancePoint(cfg, distMm, sensor, distDir);
-      allSummaries.push_back(summary);
+        DistanceSummary summary = RunDistancePoint(cfg, distMm, sensor, distDir, xOpt);
+        allSummaries.push_back(summary);
 
-      std::cout << "  ⟨Q_anode⟩       = " << FormatNumber(summary.meanAnodeChargeFC)      << " fC"
-                << "  ±" << FormatNumber(summary.semAnodeChargeFC)      << " (SEM)\n"
-                << "  ⟨Q_cathode⟩     = " << FormatNumber(summary.meanCathodeChargeFC)   << " fC"
-                << "  ±" << FormatNumber(summary.semCathodeChargeFC)    << " (SEM)\n"
-                << "  ⟨Q_cathode_top⟩ = " << FormatNumber(summary.meanCathodeTopChargeFC) << " fC"
-                << "  ±" << FormatNumber(summary.semCathodeTopChargeFC) << " (SEM)\n"
-                << "  Ramo check: |Q_anode| = "
-                << FormatNumber(std::abs(summary.meanAnodeChargeFC))
-                << "  |Q_cathode|+|Q_top| = "
-                << FormatNumber(std::abs(summary.meanCathodeChargeFC)
-                                + std::abs(summary.meanCathodeTopChargeFC)) << " fC\n"
-                << "  ⟨ratio⟩         = " << FormatNumber(summary.meanChargeRatio) << "\n"
-                << "  interaction fraction: "
-                << FormatNumber(summary.interactionFraction * 100., 2) << "%\n"
-                << "  ⟨avalanche size⟩: "
-                << FormatNumber(summary.meanAvalancheSize, 0) << " electrons\n";
+        std::cout << "  ⟨Q_anode⟩       = " << FormatNumber(summary.meanAnodeChargeFC)      << " fC"
+                  << "  ±" << FormatNumber(summary.semAnodeChargeFC)      << " (SEM)\n"
+                  << "  ⟨Q_cathode⟩     = " << FormatNumber(summary.meanCathodeChargeFC)   << " fC"
+                  << "  ±" << FormatNumber(summary.semCathodeChargeFC)    << " (SEM)\n"
+                  << "  ⟨Q_cathode_top⟩ = " << FormatNumber(summary.meanCathodeTopChargeFC) << " fC"
+                  << "  ±" << FormatNumber(summary.semCathodeTopChargeFC) << " (SEM)\n"
+                  << "  Ramo check: |Q_anode| = "
+                  << FormatNumber(std::abs(summary.meanAnodeChargeFC))
+                  << "  |Q_cathode|+|Q_top| = "
+                  << FormatNumber(std::abs(summary.meanCathodeChargeFC)
+                                  + std::abs(summary.meanCathodeTopChargeFC)) << " fC\n"
+                  << "  ⟨ratio⟩         = " << FormatNumber(summary.meanChargeRatio) << "\n"
+                  << "  interaction fraction: "
+                  << FormatNumber(summary.interactionFraction * 100., 2) << "%\n"
+                  << "  ⟨avalanche size⟩: "
+                  << FormatNumber(summary.meanAvalancheSize, 0) << " electrons\n";
+      }
     }
 
     WriteSummaryGraphs(allSummaries, summaryDir, runDir / "summary" / "tgc_summary.png");
