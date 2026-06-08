@@ -93,9 +93,10 @@ struct ReadoutConfig {
 };
 
 struct SourceConfig {
-  double energyKeV                     = 5.9;
-  std::vector<double> distancesMm      = {0.2, 0.5, 0.9, 1.2};
-  std::optional<std::vector<double>> fixedXCmList;  // nullopt → uniform random over wire span
+  double energyKeV                                          = 5.9;
+  std::optional<std::vector<double>> fixedDistMm            =       // nullopt → uniform random over gap
+      std::vector<double>{0.2, 0.5, 0.9, 1.2};
+  std::optional<std::vector<double>> fixedXCmList;                  // nullopt → uniform random over wire span
 };
 
 struct GasConfig {
@@ -137,7 +138,7 @@ struct Config {
 // ─── Per-distance summary ─────────────────────────────────────────────────────
 
 struct DistanceSummary {
-  double      distanceMm            = 0.;
+  std::optional<double> distanceMm;           // nullopt = random per event
   std::optional<double> xPositionCm;          // nullopt = random per event
   std::size_t nEvents               = 0;
   std::size_t nInteracted           = 0;
@@ -389,7 +390,15 @@ Config LoadConfig(const fs::path& path) {
 
   if (const auto* s = FindSection(root, "source")) {
     cfg.source.energyKeV    = ReadDouble(*s, "source", "energy_keV", cfg.source.energyKeV);
-    cfg.source.distancesMm  = ReadDoubleArray(*s, "source", "source_distances_mm", cfg.source.distancesMm);
+    {
+      auto* dl = FindMember(*s, "source_distances_mm", {"source", "source_distances_mm"});
+      if (dl && dl->is_array()) {
+        cfg.source.fixedDistMm = std::vector<double>{};
+        for (auto& v : *dl) cfg.source.fixedDistMm->push_back(v.get<double>());
+      } else {
+        cfg.source.fixedDistMm = std::nullopt;  // random per event
+      }
+    }
     auto* xpList = FindMember(*s, "x_positions_cm", {"source", "x_positions_cm"});
     if (xpList && xpList->is_array()) {
       cfg.source.fixedXCmList = std::vector<double>{};
@@ -443,7 +452,8 @@ Config LoadConfig(const fs::path& path) {
   if (cfg.geometry.gapCm       <= 0.)  throw std::runtime_error("geometry.gap_cm must be positive");
   if (cfg.geometry.nWires      <= 0)   throw std::runtime_error("geometry.n_wires must be positive");
   if (cfg.geometry.wireVoltageV<= 0.)  throw std::runtime_error("geometry.wire_voltage_V must be positive");
-  if (cfg.source.distancesMm.empty())  throw std::runtime_error("source.source_distances_mm must not be empty");
+  if (cfg.source.fixedDistMm.has_value() && cfg.source.fixedDistMm->empty())
+    throw std::runtime_error("source.source_distances_mm must not be empty when set");
   if (cfg.gas.frac1 <= 0. || cfg.gas.frac1 >= 100.)
     throw std::runtime_error("gas.gas1_fraction_pct must be in (0, 100)");
   if (cfg.gas.temperatureK     <= 0.)  throw std::runtime_error("gas.temperature_K must be positive");
@@ -687,19 +697,17 @@ void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
 // ─── Per-distance simulation loop ─────────────────────────────────────────────
 
 DistanceSummary RunDistancePoint(const Config& cfg,
-                                 double sourceDistanceMm,
+                                 std::optional<double> distOptMm,
                                  Sensor& sensor,
                                  TDirectory* distDir,
                                  std::optional<double> fixedXCm = std::nullopt) {
   const auto& geom = cfg.geometry;
   const auto& sim  = cfg.simulation;
 
-  const double sourceYCm = -sourceDistanceMm * 0.1; // mm → cm, positive distance → readout side (y < 0)
-  // Clamp to strictly inside the gas gap (away from cathode surfaces)
-  const double y0 = std::max(-geom.gapCm + 1.e-4,
-                              std::min(geom.gapCm - 1.e-4, sourceYCm));
   // Half-span of the wire array for random x sampling
   const double xHalfWires = (geom.nWires - 1) / 2. * geom.wirePitchCm;
+  // Half-gap for random distance sampling (mm)
+  const double gapHalfMm  = geom.gapCm * 10.0 / 2.0;
 
   const std::size_t nBins =
       static_cast<std::size_t>(std::round(sim.timeWindowNs / sim.timeStepNs));
@@ -795,6 +803,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
   std::size_t nInteracted = 0;
   const std::size_t progressStep = std::max<std::size_t>(1, sim.nEvents / 10);
+  const std::string distLabel = distOptMm.has_value()
+      ? FormatNumber(*distOptMm) + " mm" : "random";
 
   // ── Event loop ───────────────────────────────────────────────────────────────
   for (std::size_t ev = 0; ev < sim.nEvents; ++ev) {
@@ -803,6 +813,13 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     const double x0 = fixedXCm.has_value()
                           ? *fixedXCm
                           : gRandom->Uniform(-xHalfWires, xHalfWires);
+
+    const double distMm   = distOptMm.has_value()
+                                ? *distOptMm
+                                : gRandom->Uniform(-gapHalfMm, gapHalfMm);
+    const double sourceYCm = -distMm * 0.1;  // mm → cm, positive distance → readout side (y < 0)
+    const double y0 = std::max(-geom.gapCm + 1.e-4,
+                                std::min(geom.gapCm - 1.e-4, sourceYCm));
 
     // Transport one representative electron from (x0, y0, 0) and scale all results
     // by nPrimary.  This is exact for the mean Q_cathode/Q_anode ratio (the key
@@ -949,7 +966,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     }
 
     if ((ev + 1) % progressStep == 0 || ev + 1 == sim.nEvents) {
-      std::cout << "  dist=" << FormatNumber(sourceDistanceMm) << " mm: "
+      std::cout << "  dist=" << distLabel << ": "
                 << (ev + 1) << "/" << sim.nEvents
                 << " events processed\n";
     }
@@ -972,7 +989,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
   // ── Build summary ─────────────────────────────────────────────────────────────
   DistanceSummary s;
-  s.distanceMm          = sourceDistanceMm;
+  s.distanceMm          = distOptMm;  // nullopt when random per-event
   s.nEvents             = sim.nEvents;
   s.nInteracted         = nInteracted;
   s.interactionFraction = sim.nEvents > 0
@@ -1011,7 +1028,7 @@ void WriteSummaryGraphs(const std::vector<DistanceSummary>& sums,
   std::vector<double> qa(n), qaE(n), qc(n), qcE(n), qt(n), qtE(n), rat(n), ratE(n);
 
   for (std::size_t i = 0; i < n; ++i) {
-    x[i]    = sums[i].distanceMm;
+    x[i]    = sums[i].distanceMm.value_or(static_cast<double>(i));
     qa[i]   = sums[i].meanAnodeChargeFC;      qaE[i]  = sums[i].semAnodeChargeFC;
     qc[i]   = sums[i].meanCathodeChargeFC;    qcE[i]  = sums[i].semCathodeChargeFC;
     qt[i]   = sums[i].meanCathodeTopChargeFC; qtE[i]  = sums[i].semCathodeTopChargeFC;
@@ -1065,7 +1082,8 @@ void WriteSummaryCsv(const fs::path& path, const std::vector<DistanceSummary>& s
 
   f << std::fixed << std::setprecision(6);
   for (const auto& s : sums) {
-    f << s.distanceMm                << ',';
+    if (s.distanceMm) f << *s.distanceMm; else f << "random";
+    f << ',';
     if (s.xPositionCm.has_value()) f << *s.xPositionCm;
     f << ','
       << s.nEvents                   << ','
@@ -1092,9 +1110,11 @@ void WriteSummaryCsv(const fs::path& path, const std::vector<DistanceSummary>& s
 
 json ConfigToJson(const Config& cfg) {
   json jSrc = {
-    {"energy_keV",           cfg.source.energyKeV},
-    {"source_distances_mm",  cfg.source.distancesMm}
+    {"energy_keV", cfg.source.energyKeV}
   };
+  jSrc["source_distances_mm"] = cfg.source.fixedDistMm.has_value()
+                                     ? json(*cfg.source.fixedDistMm)
+                                     : json(nullptr);
   jSrc["x_positions_cm"] = cfg.source.fixedXCmList.has_value()
                                ? json(*cfg.source.fixedXCmList)
                                : json(nullptr);
@@ -1166,7 +1186,7 @@ int main(int argc, char* argv[]) {
     Config cfg = LoadConfig(opts.configPath);
 
     if (opts.singleDistanceMm)
-      cfg.source.distancesMm = {*opts.singleDistanceMm};
+      cfg.source.fixedDistMm = std::vector<double>{*opts.singleDistanceMm};
 
     const fs::path runDir = opts.outDir / BuildRunFolderName(cfg);
     EnsureDirectory(runDir);
@@ -1194,7 +1214,9 @@ int main(int argc, char* argv[]) {
               << cfg.gas.temperatureK << " K, "
               << cfg.gas.pressureTorr << " Torr\n"
               << "  source  : " << cfg.source.energyKeV << " keV, "
-              << cfg.source.distancesMm.size() << " distance point(s)"
+              << (cfg.source.fixedDistMm.has_value()
+                    ? std::to_string(cfg.source.fixedDistMm->size()) + " distance point(s)"
+                    : "random distance")
               << (cfg.source.fixedXCmList.has_value()
                     ? (", " + std::to_string(cfg.source.fixedXCmList->size()) + " x-position(s)")
                     : std::string(", x random"))
@@ -1249,6 +1271,17 @@ int main(int argc, char* argv[]) {
 
     std::vector<DistanceSummary> allSummaries;
 
+    // Build flat list of (optional) distances to iterate:
+    //   nullopt  → pick uniform random y per event  (directory name: "dist_rnd[_xYYmm]")
+    //   value    → fixed distance for all events in that directory
+    std::vector<std::optional<double>> dList;
+    if (cfg.source.fixedDistMm.has_value() && !cfg.source.fixedDistMm->empty()) {
+      for (double d : *cfg.source.fixedDistMm)
+        dList.push_back(d);
+    } else {
+      dList.push_back(std::nullopt);  // random per event
+    }
+
     // Build flat list of (optional) x-positions to iterate:
     //   nullopt  → pick uniform random x per event  (no _x suffix in directory name)
     //   value    → fixed x for all events in that directory
@@ -1260,20 +1293,22 @@ int main(int argc, char* argv[]) {
       xList.push_back(std::nullopt);  // random per event
     }
 
-    for (const double distMm : cfg.source.distancesMm) {
+    for (const auto& dOpt : dList) {
       for (const auto& xOpt : xList) {
-        std::string label = FormatNumber(distMm) + " mm";
+        std::string label = dOpt.has_value() ? FormatNumber(*dOpt) + " mm" : "random";
         if (xOpt.has_value())
           label += "  x=" + FormatNumber(*xOpt * 10.0) + " mm";
         std::cout << "\n--- Source distance: " << label << " ---\n";
 
-        std::string tag = "dist_" + FileSafeNumber(distMm) + "mm";
+        std::string tag = dOpt.has_value()
+            ? "dist_" + FileSafeNumber(*dOpt) + "mm"
+            : "dist_rnd";
         if (xOpt.has_value())
           tag += "_x" + FileSafeNumber(*xOpt * 10.0) + "mm";  // cm → mm for name
         TDirectory* distDir = rootFile.mkdir(tag.c_str());
         if (!distDir) throw std::runtime_error("Failed to create ROOT dir: " + tag);
 
-        DistanceSummary summary = RunDistancePoint(cfg, distMm, sensor, distDir, xOpt);
+        DistanceSummary summary = RunDistancePoint(cfg, dOpt, sensor, distDir, xOpt);
         summary.xPositionCm = xOpt;
         allSummaries.push_back(summary);
 

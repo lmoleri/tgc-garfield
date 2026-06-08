@@ -235,8 +235,12 @@ class ConfigPanel(QScrollArea):
         src_form = QFormLayout(src_box)
 
         self.energy_kev = self._dspin(0.1, 100.0, 0.1, 2, 5.9)
+
+        self.dist_random = QCheckBox("Random (uniform over gap)")
+        self.dist_random.setChecked(False)
         self.distances  = QLineEdit("0.2,0.5,0.9,1.2")
         self.distances.setToolTip("Comma-separated source y-distances from wire plane [mm]")
+        self.dist_random.toggled.connect(lambda on: self.distances.setEnabled(not on))
 
         self.x_random = QCheckBox("Random (uniform over wire span)")
         self.x_random.setChecked(True)
@@ -246,10 +250,11 @@ class ConfigPanel(QScrollArea):
             "Comma-separated fixed x-positions [cm] (e.g. 0.0, 0.09, 0.18)")
         self.x_random.toggled.connect(lambda on: self.x_positions.setEnabled(not on))
 
-        src_form.addRow("Energy [keV]",   self.energy_kev)
-        src_form.addRow("Distances [mm]", self.distances)
-        src_form.addRow("X position",     self.x_random)
-        src_form.addRow("  fixed x [cm]", self.x_positions)
+        src_form.addRow("Energy [keV]",      self.energy_kev)
+        src_form.addRow("Distance",          self.dist_random)
+        src_form.addRow("  fixed dist [mm]", self.distances)
+        src_form.addRow("X position",        self.x_random)
+        src_form.addRow("  fixed x [cm]",    self.x_positions)
         root_layout.addWidget(src_box)
 
         # ── Gas ───────────────────────────────────────────────────────────
@@ -520,11 +525,14 @@ class ConfigPanel(QScrollArea):
 
     def to_config_dict(self) -> dict:
         """Assemble widget values into a config dict suitable for JSON dump."""
-        raw = self.distances.text().strip()
-        try:
-            dists = [float(x.strip()) for x in raw.split(",") if x.strip()]
-        except ValueError:
-            dists = [0.7]
+        if self.dist_random.isChecked():
+            dists = None  # → JSON null → C++ random per-event
+        else:
+            raw = self.distances.text().strip()
+            try:
+                dists = [float(x.strip()) for x in raw.split(",") if x.strip()]
+            except ValueError:
+                dists = [0.7]
 
         if self.x_random.isChecked():
             x_positions = None
@@ -603,7 +611,11 @@ class ConfigPanel(QScrollArea):
         s = d.get("source", {})
         self.energy_kev.setValue(s.get("energy_keV", 5.9))
         dists = s.get("source_distances_mm", [0.2, 0.5, 0.9, 1.2])
-        self.distances.setText(",".join(str(v) for v in dists))
+        if dists is None:
+            self.dist_random.setChecked(True)
+        else:
+            self.dist_random.setChecked(False)
+            self.distances.setText(",".join(str(v) for v in dists))
         x_positions = s.get("x_positions_cm", None)
         if x_positions is None:
             # backward compat: old scalar key
@@ -1213,7 +1225,7 @@ class ResultsPanel(QTabWidget):
                 # (pad, col,               take_abs, logy, title, xlabel, ylabel)
                 (1, "vd_cm_per_us",     True,  False,
                  "Electron drift velocity",
-                 "E [kV/cm]", "|v_{d}| [cm/#mu{}s]"),
+                 "E [kV/cm]", "|v_{d}| [cm/#mus]"),
                 (2, "alpha_per_cm",     False, True,
                  "Townsend #alpha",
                  "E [kV/cm]", "#alpha [cm^{-1}]"),
@@ -1231,10 +1243,10 @@ class ResultsPanel(QTabWidget):
                  "E [kV/cm]", "(#alpha-#eta) [cm^{-1}]"),
                 (7, "v_ion_cm_per_us",  True,  False,
                  _ion_title_v,
-                 "E [kV/cm]", "|v_{ion}| [cm/#mu{}s]"),
+                 "E [kV/cm]", "|v_{ion}| [cm/#mus]"),
                 (8, "mu_ion_cm2_per_Vus", False, False,
                  _ion_title_mu,
-                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot{}#mu{}s)]"),
+                 "E [kV/cm]", "#mu [cm^{2}/(V#upoint#mus)]"),
             ]
             for pad_num, col, take_abs, logy, title, xlabel, ylabel in panels:
                 self._gas_canvas.cd(pad_num)
@@ -1305,7 +1317,7 @@ class ResultsPanel(QTabWidget):
             f = ROOT.TFile(path, "RECREATE")
             spec = [
                 ("vd",    "vd_cm_per_us",       True,
-                 "Electron drift velocity;E [kV/cm];|v_{d}| [cm/#mu{}s]"),
+                 "Electron drift velocity;E [kV/cm];|v_{d}| [cm/#mus]"),
                 ("alpha", "alpha_per_cm",        False,
                  "Townsend #alpha;E [kV/cm];#alpha [cm^{-1}]"),
                 ("eta",   "eta_per_cm",          False,
@@ -1315,9 +1327,9 @@ class ResultsPanel(QTabWidget):
                 ("dt",    "dt_sqrtcm",           False,
                  "Trans. diffusion;E [kV/cm];D_{T} [cm^{0.5}]"),
                 ("v_ion", "v_ion_cm_per_us",     True,
-                 "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mu{}s]"),
+                 "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mus]"),
                 ("mu",    "mu_ion_cm2_per_Vus",  False,
-                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot{}#mu{}s)]"),
+                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#upoint#mus)]"),
             ]
             for gname, col, take_abs, title in spec:
                 if col not in df.columns:
@@ -1419,7 +1431,7 @@ class ResultsPanel(QTabWidget):
                 for key in dist_keys:
                     rest = key.removeprefix("dist_")
                     dist_raw, sep, xpos_raw = rest.partition("_x")
-                    dist_label = dist_raw.replace("p", ".").replace("mm", " mm")
+                    dist_label = "—" if dist_raw == "rnd" else dist_raw.replace("p", ".").replace("mm", " mm")
                     xpos_label = xpos_raw.replace("p", ".").replace("mm", " mm") if sep else "—"
                     try:
                         pa     = f[f"{key}/p_anode_signal"]
@@ -1441,12 +1453,12 @@ class ResultsPanel(QTabWidget):
                             "mean_a":  mean_a,
                             "mean_c":  mean_c,
                         }
-                        if self.wave_dist_combo.findText(dist_label) == -1:
-                            self.wave_dist_combo.addItem(dist_label)
-                        if self.charge_dist_combo.findText(dist_label) == -1:
-                            self.charge_dist_combo.addItem(dist_label)
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
+                # Populate dist combos in sorted order (random "—" first)
+                for dl in self._sorted_dists(self._waveform_data.keys()):
+                    self.wave_dist_combo.addItem(dl)
+                    self.charge_dist_combo.addItem(dl)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file: {exc}")
 
@@ -1471,6 +1483,16 @@ class ResultsPanel(QTabWidget):
             except ValueError:
                 return -1e9
         return sorted(xpos_dict.keys(), key=_key)
+
+    @staticmethod
+    def _sorted_dists(dists_iterable) -> list:
+        """Return distance labels sorted numerically; '—' (random) sorts first."""
+        def _key(s):
+            try:
+                return float(s.replace(" mm", ""))
+            except ValueError:
+                return -1e9
+        return sorted(dists_iterable, key=_key)
 
     def _rebuild_charge_xpos(self):
         """Repopulate charge_xpos_combo to match the current charge_dist selection."""
@@ -1817,7 +1839,7 @@ class ResultsPanel(QTabWidget):
                 for key in all_keys:
                     rest = key.removeprefix("dist_")
                     dist_raw, sep, xpos_raw = rest.partition("_x")
-                    dist_label = dist_raw.replace("p", ".").replace("mm", " mm")
+                    dist_label = "—" if dist_raw == "rnd" else dist_raw.replace("p", ".").replace("mm", " mm")
                     xpos_label = (xpos_raw.replace("p", ".").replace("mm", " mm")
                                   if sep else "—")
                     try:
@@ -1837,10 +1859,11 @@ class ResultsPanel(QTabWidget):
                             "ion_npts":  tree["ion_npts"].array(library="np"),
                         }
                         self._track_data.setdefault(dist_label, {})[xpos_label] = data_dict
-                        if self.trk_dist_combo.findText(dist_label) == -1:
-                            self.trk_dist_combo.addItem(dist_label)
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Track load error for {key}: {exc}")
+                # Populate dist combo in sorted order (random "—" first)
+                for dl in self._sorted_dists(self._track_data.keys()):
+                    self.trk_dist_combo.addItem(dl)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file for tracks: {exc}")
 
