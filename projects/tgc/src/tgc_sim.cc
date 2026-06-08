@@ -99,6 +99,10 @@ struct SourceConfig {
 };
 
 struct GasConfig {
+  std::string gas1           = "ar";      // first gas species (Magboltz name, lowercase)
+  double      frac1          = 70.0;      // fraction of gas1 [%]; gas2 gets 100 − frac1
+  std::string gas2           = "co2";     // second gas species
+  std::string ionSpecies     = "co2";     // base name for IonMobility_{X}+_{X}.txt
   double temperatureK        = 293.15;
   double pressureTorr        = 760.0;
   bool   enablePenning       = true;
@@ -134,6 +138,7 @@ struct Config {
 
 struct DistanceSummary {
   double      distanceMm            = 0.;
+  std::optional<double> xPositionCm;          // nullopt = random per event
   std::size_t nEvents               = 0;
   std::size_t nInteracted           = 0;
   double      interactionFraction   = 0.;
@@ -175,9 +180,11 @@ std::string DeriveGasFileName(const GasConfig& g) {
   auto I = [](double v) {
     return std::to_string(static_cast<long long>(std::llround(v)));
   };
-  const int efKv = static_cast<int>(std::llround(g.eFieldMaxVcm / 1000.0));
-  return "ar70_co2_30"
-         "_T"  + I(g.temperatureK)
+  const int    efKv  = static_cast<int>(std::llround(g.eFieldMaxVcm / 1000.0));
+  const double frac2 = 100.0 - g.frac1;
+  const std::string prefix = g.gas1 + I(g.frac1) + "_" + g.gas2 + "_" + I(frac2);
+  return prefix
+       + "_T"  + I(g.temperatureK)
        + "_P"  + I(g.pressureTorr)
        + "_Ee" + I(g.maxElectronEnergyEV)
        + "_Ef" + std::to_string(efKv) + "k"
@@ -397,6 +404,10 @@ Config LoadConfig(const fs::path& path) {
   }
 
   if (const auto* g = FindSection(root, "gas")) {
+    cfg.gas.gas1       = ReadString(*g, "gas", "gas1",               cfg.gas.gas1);
+    cfg.gas.frac1      = ReadDouble(*g, "gas", "gas1_fraction_pct",  cfg.gas.frac1);
+    cfg.gas.gas2       = ReadString(*g, "gas", "gas2",               cfg.gas.gas2);
+    cfg.gas.ionSpecies = ReadString(*g, "gas", "ion_species",        cfg.gas.ionSpecies);
     cfg.gas.temperatureK  = ReadDouble(*g, "gas", "temperature_K",       cfg.gas.temperatureK);
     cfg.gas.pressureTorr  = ReadDouble(*g, "gas", "pressure_Torr",       cfg.gas.pressureTorr);
     cfg.gas.enablePenning = ReadBool  (*g, "gas", "enable_penning",       cfg.gas.enablePenning);
@@ -433,6 +444,8 @@ Config LoadConfig(const fs::path& path) {
   if (cfg.geometry.nWires      <= 0)   throw std::runtime_error("geometry.n_wires must be positive");
   if (cfg.geometry.wireVoltageV<= 0.)  throw std::runtime_error("geometry.wire_voltage_V must be positive");
   if (cfg.source.distancesMm.empty())  throw std::runtime_error("source.source_distances_mm must not be empty");
+  if (cfg.gas.frac1 <= 0. || cfg.gas.frac1 >= 100.)
+    throw std::runtime_error("gas.gas1_fraction_pct must be in (0, 100)");
   if (cfg.gas.temperatureK     <= 0.)  throw std::runtime_error("gas.temperature_K must be positive");
   if (cfg.gas.pressureTorr     <= 0.)  throw std::runtime_error("gas.pressure_Torr must be positive");
   if (cfg.simulation.nEvents   == 0)   throw std::runtime_error("simulation.n_events must be at least 1");
@@ -444,7 +457,8 @@ Config LoadConfig(const fs::path& path) {
 
 // ─── Gas setup ────────────────────────────────────────────────────────────────
 
-static void ExportGasProps(MediumMagboltz& gas, const std::string& outPath) {
+static void ExportGasProps(MediumMagboltz& gas, const std::string& outPath,
+                           const std::string& ionMobFile = "") {
   std::vector<double> efields, bfields, angles;
   gas.GetFieldGrid(efields, bfields, angles);
 
@@ -452,6 +466,13 @@ static void ExportGasProps(MediumMagboltz& gas, const std::string& outPath) {
   if (!f) {
     std::cerr << "  Warning: could not write gas properties to " << outPath << "\n";
     return;
+  }
+  // Write ion mobility basename as a comment so the GUI can parse ion/gas names.
+  if (!ionMobFile.empty()) {
+    const auto sep = ionMobFile.find_last_of("/\\");
+    const std::string base = (sep == std::string::npos)
+                             ? ionMobFile : ionMobFile.substr(sep + 1);
+    f << "# ion_mobility: " << base << "\n";
   }
   f << "e_field_Vcm,vd_cm_per_us,alpha_per_cm,eta_per_cm,"
        "dl_sqrtcm,dt_sqrtcm,v_ion_cm_per_us,mu_ion_cm2_per_Vus\n";
@@ -523,26 +544,31 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
     }
   }
 
-  // CO2+ is the dominant drifting ion in Ar:CO2 mixtures.  After the initial
-  // photoelectric absorption, Ar+ rapidly charge-transfers to CO2+ because
-  // the CO2 ionisation potential (13.78 eV) is lower than Ar (15.76 eV).
-  // Garfield++ accepts a single positive-ion mobility table per gas object.
+  // Load ion mobility table for the configured ion species.
+  // Garfield++ ships IonMobility_{X}+_{X}.txt for single-component gas X;
+  // the species name is uppercased to match the filename convention.
   const char* garfieldInstall = std::getenv("GARFIELD_INSTALL");
+  std::string loadedMob;   // basename recorded here for the props CSV comment
   if (garfieldInstall) {
+    std::string ionUpper = cfg.ionSpecies;
+    std::transform(ionUpper.begin(), ionUpper.end(), ionUpper.begin(), ::toupper);
     const std::string mobFile = std::string(garfieldInstall) +
-                                "/share/Garfield/Data/IonMobility_CO2+_CO2.txt";
+                                "/share/Garfield/Data/IonMobility_"
+                                + ionUpper + "+_" + ionUpper + ".txt";
     if (fs::exists(mobFile)) {
       gas.LoadIonMobility(mobFile);
-      std::cout << "  CO2+ ion mobility loaded.\n";
+      std::cout << "  " << ionUpper << "+ ion mobility loaded.\n";
+      loadedMob = mobFile;
     } else {
-      std::cerr << "  Warning: IonMobility_CO2+_CO2.txt not found at " << mobFile << "\n";
+      std::cerr << "  Warning: IonMobility_" << ionUpper << "+_" << ionUpper
+                << ".txt not found at " << mobFile << "\n";
     }
   } else {
     std::cerr << "  Warning: GARFIELD_INSTALL not set; ion mobility not loaded.\n";
   }
 
   const std::string propsFile = gasFile.substr(0, gasFile.size() - 4) + "_props.csv";
-  ExportGasProps(gas, propsFile);
+  ExportGasProps(gas, propsFile, loadedMob);
 }
 
 // ─── Geometry and sensor setup ────────────────────────────────────────────────
@@ -1030,7 +1056,7 @@ void WriteSummaryCsv(const fs::path& path, const std::vector<DistanceSummary>& s
   std::ofstream f(path);
   if (!f) throw std::runtime_error("Cannot write CSV: " + path.string());
 
-  f << "source_distance_mm,n_events,n_interacted,interaction_fraction,"
+  f << "source_distance_mm,x_position_cm,n_events,n_interacted,interaction_fraction,"
        "mean_anode_charge_fC,rms_anode_charge_fC,sem_anode_charge_fC,"
        "mean_cathode_charge_fC,rms_cathode_charge_fC,sem_cathode_charge_fC,"
        "mean_cathode_top_charge_fC,rms_cathode_top_charge_fC,sem_cathode_top_charge_fC,"
@@ -1039,7 +1065,9 @@ void WriteSummaryCsv(const fs::path& path, const std::vector<DistanceSummary>& s
 
   f << std::fixed << std::setprecision(6);
   for (const auto& s : sums) {
-    f << s.distanceMm                << ','
+    f << s.distanceMm                << ',';
+    if (s.xPositionCm.has_value()) f << *s.xPositionCm;
+    f << ','
       << s.nEvents                   << ','
       << s.nInteracted               << ','
       << s.interactionFraction       << ','
@@ -1087,6 +1115,10 @@ json ConfigToJson(const Config& cfg) {
     }},
     {"source", jSrc},
     {"gas", {
+      {"gas1",                   cfg.gas.gas1},
+      {"gas1_fraction_pct",      cfg.gas.frac1},
+      {"gas2",                   cfg.gas.gas2},
+      {"ion_species",            cfg.gas.ionSpecies},
       {"temperature_K",          cfg.gas.temperatureK},
       {"pressure_Torr",          cfg.gas.pressureTorr},
       {"enable_penning",         cfg.gas.enablePenning},
@@ -1156,7 +1188,10 @@ int main(int argc, char* argv[]) {
                        + (cfg.readout.enableDelayedSignal ? ", delayed signal on" : ", delayed signal off") + ")")
                     : std::string())
               << "\n"
-              << "  gas     : Ar:CO2 70:30, " << cfg.gas.temperatureK << " K, "
+              << "  gas     : " << cfg.gas.gas1 << ":" << cfg.gas.gas2
+              << " " << static_cast<int>(cfg.gas.frac1) << ":"
+              << static_cast<int>(100. - cfg.gas.frac1) << ", "
+              << cfg.gas.temperatureK << " K, "
               << cfg.gas.pressureTorr << " Torr\n"
               << "  source  : " << cfg.source.energyKeV << " keV, "
               << cfg.source.distancesMm.size() << " distance point(s)"
@@ -1186,7 +1221,8 @@ int main(int argc, char* argv[]) {
 
     // Gas is shared across all distance points
     std::cout << "\nSetting up gas...\n";
-    MediumMagboltz gas("ar", 70., "co2", 30.);
+    MediumMagboltz gas(cfg.gas.gas1, cfg.gas.frac1,
+                       cfg.gas.gas2, 100. - cfg.gas.frac1);
     SetupGas(gas, cfg.gas);
 
     // Geometry and sensor are shared across all distance points
@@ -1238,6 +1274,7 @@ int main(int argc, char* argv[]) {
         if (!distDir) throw std::runtime_error("Failed to create ROOT dir: " + tag);
 
         DistanceSummary summary = RunDistancePoint(cfg, distMm, sensor, distDir, xOpt);
+        summary.xPositionCm = xOpt;
         allSummaries.push_back(summary);
 
         std::cout << "  ⟨Q_anode⟩       = " << FormatNumber(summary.meanAnodeChargeFC)      << " fC"

@@ -15,8 +15,7 @@ projects/tgc/
 ├── src/
 │   └── tgc_sim.cc              ← simulation binary (C++20, ~500 lines)
 ├── config/
-│   ├── default_tgc.json        ← production config (4 distances, 1000 events each)
-│   └── smoke_tgc.json          ← fast smoke-test config (1 distance, 10 events)
+│   ├── default_tgc.json        ← production config 
 ├── gui/
 │   └── app.py                  ← PyQt5 desktop GUI
 ├── third_party/

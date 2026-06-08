@@ -65,6 +65,10 @@ GARFIELD_INSTALL = (TGC_DIR / "../../local/garfield").resolve() # …/local/garf
 
 def derive_gas_filename(gas: dict) -> str:
     """Return a deterministic .gas filename from gas config parameters."""
+    g1  = gas.get("gas1", "ar")
+    f1  = round(gas.get("gas1_fraction_pct", 70.0))
+    g2  = gas.get("gas2", "co2")
+    f2  = 100 - f1
     T   = round(gas.get("temperature_K", 293.15))
     P   = round(gas.get("pressure_Torr", 760.0))
     Ee  = round(gas.get("max_electron_energy_eV", 2000.0))
@@ -72,7 +76,7 @@ def derive_gas_filename(gas: dict) -> str:
     n   = gas.get("n_field_points", 20)
     c   = gas.get("n_magboltz_collisions", 10)
     pen = "pen" if gas.get("enable_penning", True) else "nopen"
-    return f"ar70_co2_30_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen}.gas"
+    return f"{g1}{f1}_{g2}_{f2}_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen}.gas"
 
 
 def derive_gas_props_filename(gas: dict) -> str:
@@ -252,6 +256,56 @@ class ConfigPanel(QScrollArea):
         gas_box  = QGroupBox("Gas")
         gas_form = QFormLayout(gas_box)
 
+        # — Composition rows —
+        _GAS_LIST = ["ar", "co2", "cf4", "ch4", "c2h6", "n2", "he", "ne"]
+        _ION_LIST  = ["ar", "co2", "cf4", "he", "ne"]  # species with IonMobility files
+
+        self.gas1_combo = QComboBox()
+        self.gas1_combo.addItems(_GAS_LIST)
+        self.gas1_combo.setEditable(True)
+        self.gas1_combo.setCurrentText("ar")
+        self.gas1_combo.setToolTip("First gas component (Magboltz species name, lowercase)")
+
+        self.frac1_spin = QDoubleSpinBox()
+        self.frac1_spin.setRange(1.0, 99.0)
+        self.frac1_spin.setSingleStep(1.0)
+        self.frac1_spin.setDecimals(1)
+        self.frac1_spin.setValue(70.0)
+        self.frac1_spin.setSuffix(" %")
+
+        gas1_row = QWidget()
+        gas1_h   = QHBoxLayout(gas1_row)
+        gas1_h.setContentsMargins(0, 0, 0, 0)
+        gas1_h.addWidget(self.gas1_combo)
+        gas1_h.addWidget(self.frac1_spin)
+        gas_form.addRow("Gas 1 [%]", gas1_row)
+
+        self.gas2_combo = QComboBox()
+        self.gas2_combo.addItems(_GAS_LIST)
+        self.gas2_combo.setEditable(True)
+        self.gas2_combo.setCurrentText("co2")
+        self.gas2_combo.setToolTip("Second gas component (Magboltz species name, lowercase)")
+
+        self.gas2_frac_lbl = QLabel("30.0 %")
+        self.gas2_frac_lbl.setToolTip("Fraction of gas 2 = 100% − gas 1 fraction (auto-computed)")
+
+        gas2_row = QWidget()
+        gas2_h   = QHBoxLayout(gas2_row)
+        gas2_h.setContentsMargins(0, 0, 0, 0)
+        gas2_h.addWidget(self.gas2_combo)
+        gas2_h.addWidget(self.gas2_frac_lbl)
+        gas_form.addRow("Gas 2 [%]", gas2_row)
+
+        self.ion_combo = QComboBox()
+        self.ion_combo.addItems(_ION_LIST)
+        self.ion_combo.setCurrentText("co2")
+        self.ion_combo.setToolTip(
+            "Ion species for the mobility table (IonMobility_X+_X.txt).\n"
+            "Available: ar, co2, cf4, he, ne.\n"
+            "Should match the dominant drifting ion in the mixture."
+        )
+        gas_form.addRow("Ion species", self.ion_combo)
+
         self.temperature = self._dspin(200.0, 500.0, 1.0, 2, 293.15)
         self.pressure    = self._dspin(100.0, 3000.0, 10.0, 1, 760.0)
 
@@ -306,6 +360,12 @@ class ConfigPanel(QScrollArea):
         root_layout.addWidget(gas_box)
 
         # Update gas file label whenever a gas or geometry parameter changes
+        self.gas1_combo.currentTextChanged.connect(self._update_gas2_frac_label)
+        self.frac1_spin.valueChanged.connect(self._update_gas2_frac_label)
+        self.gas1_combo.currentTextChanged.connect(self._update_gas_file_label)
+        self.frac1_spin.valueChanged.connect(self._update_gas_file_label)
+        self.gas2_combo.currentTextChanged.connect(self._update_gas_file_label)
+        self.ion_combo.currentTextChanged.connect(self._update_gas_file_label)
         self.temperature.valueChanged.connect(self._update_gas_file_label)
         self.pressure.valueChanged.connect(self._update_gas_file_label)
         self.penning.toggled.connect(self._update_gas_file_label)
@@ -370,6 +430,7 @@ class ConfigPanel(QScrollArea):
         root_layout.addStretch()
         self.setWidget(container)
 
+        self._update_gas2_frac_label()
         self._update_gas_file_label()
 
     # ── widget factories ─────────────────────────────────────────────────
@@ -392,8 +453,15 @@ class ConfigPanel(QScrollArea):
 
     # ── gas file label ───────────────────────────────────────────────────
 
+    def _update_gas2_frac_label(self):
+        """Keep the gas-2 fraction label in sync with gas-1 fraction spinner."""
+        self.gas2_frac_lbl.setText(f"{100.0 - self.frac1_spin.value():.1f} %")
+
     def _update_gas_file_label(self):
         gas = {
+            "gas1":                   self.gas1_combo.currentText().strip().lower(),
+            "gas1_fraction_pct":      self.frac1_spin.value(),
+            "gas2":                   self.gas2_combo.currentText().strip().lower(),
             "temperature_K":          self.temperature.value(),
             "pressure_Torr":          self.pressure.value(),
             "enable_penning":         self.penning.isChecked(),
@@ -491,6 +559,10 @@ class ConfigPanel(QScrollArea):
                 "x_positions_cm":      x_positions,
             },
             "gas": {
+                "gas1":                   self.gas1_combo.currentText().strip().lower(),
+                "gas1_fraction_pct":      self.frac1_spin.value(),
+                "gas2":                   self.gas2_combo.currentText().strip().lower(),
+                "ion_species":            self.ion_combo.currentText().strip().lower(),
                 "temperature_K":          self.temperature.value(),
                 "pressure_Torr":          self.pressure.value(),
                 "enable_penning":         self.penning.isChecked(),
@@ -544,6 +616,11 @@ class ConfigPanel(QScrollArea):
             self.x_positions.setText(",".join(str(v) for v in x_positions))
 
         gas = d.get("gas", {})
+        self.gas1_combo.setCurrentText(gas.get("gas1", "ar"))
+        self.frac1_spin.setValue(       gas.get("gas1_fraction_pct", 70.0))
+        self.gas2_combo.setCurrentText(gas.get("gas2", "co2"))
+        self.ion_combo.setCurrentText( gas.get("ion_species", "co2"))
+        self._update_gas2_frac_label()
         self.temperature.setValue(gas.get("temperature_K", 293.15))
         self.pressure.setValue(   gas.get("pressure_Torr", 760.0))
         self.penning.setChecked(  gas.get("enable_penning", True))
@@ -559,7 +636,7 @@ class ConfigPanel(QScrollArea):
         self.time_window.setValue(     sim.get("time_window_ns", 300.0))
         self.time_step.setValue(       sim.get("time_step_ns", 0.5))
         self.enable_ion_drift.setChecked(sim.get("enable_ion_drift", True))
-        self.store_drift_lines.setChecked(sim.get("store_drift_lines", False))
+        self.store_drift_lines.setChecked(sim.get("store_drift_lines", True))
 
 
 # ---------------------------------------------------------------------------
@@ -599,10 +676,26 @@ class ResultsPanel(QTabWidget):
         self.addTab(self.log, "Log")
 
         # ── Summary tab ───────────────────────────────────────────────────
+        _sum_widget = QWidget()
+        _sum_vbox   = QVBoxLayout(_sum_widget)
+        _sum_vbox.setContentsMargins(4, 4, 4, 4)
+
+        _sum_btn_row = QWidget()
+        _sum_btn_h   = QHBoxLayout(_sum_btn_row)
+        _sum_btn_h.setContentsMargins(0, 0, 0, 0)
+        self.summary_export_btn = QPushButton("Export CSV …")
+        self.summary_export_btn.setEnabled(False)
+        _sum_btn_h.addWidget(self.summary_export_btn)
+        _sum_btn_h.addStretch()
+        _sum_vbox.addWidget(_sum_btn_row)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.addTab(self.table, "Summary")
+        _sum_vbox.addWidget(self.table)
+
+        self.addTab(_sum_widget, "Summary")
+        self.summary_export_btn.clicked.connect(self._on_summary_export_csv)
 
         # ── Plots tab: 2×3 matplotlib figure ─────────────────────────────
         self.plots_canvas = MplCanvas(nrows=2, ncols=3, figsize=(11, 5))
@@ -619,7 +712,7 @@ class ResultsPanel(QTabWidget):
         self._tracks_canvas  = None   # ROOT TCanvas for 3D tracks
         self._tracks_objects: list = []
         self._trk_zoom_scale: float = 1.0   # <1 zoomed in, >1 zoomed out
-        self._trk_view_phi:   float = 30.0  # TPad azimuthal angle (ROOT default)
+        self._trk_view_phi:   float = 32.0  # TPad azimuthal angle (32° avoids Y-label inside box)
         self._trk_view_theta: float = 30.0  # TPad elevation angle (ROOT default)
         self._trk_pan_x:      float = 0.0   # cm offset of X visible centre
         self._trk_pan_y:      float = 0.0   # cm offset of Y visible centre
@@ -771,7 +864,7 @@ class ResultsPanel(QTabWidget):
             ("Gap XY",   0,  90, False),  # theta=90 → camera along Z → sees X-Y
             ("Top XZ",   0,   0, False),  # phi=0   → top down (along Y) → sees X-Z
             ("Side YZ",  90,  0, False),  # phi=90  → camera along X → sees Y-Z
-            ("3D",      30,  30, True),   # default perspective + reset zoom
+            ("3D",      32,  30, True),   # default perspective + reset zoom
         ]:
             _btn = QPushButton(_label)
             _btn.setMaximumWidth(72)
@@ -992,6 +1085,7 @@ class ResultsPanel(QTabWidget):
     # ── Summary table ─────────────────────────────────────────────────────
 
     def populate_table(self, csv_path: str):
+        self._summary_csv_path = csv_path
         try:
             df = pd.read_csv(csv_path)
         except Exception as exc:  # noqa: BLE001
@@ -1006,12 +1100,18 @@ class ResultsPanel(QTabWidget):
 
         for r_idx, row in df.iterrows():
             for c_idx, val in enumerate(row):
-                text = f"{val:.4g}" if isinstance(val, float) else str(val)
+                if isinstance(val, float) and not pd.isna(val):
+                    text = f"{val:.4g}"
+                elif isinstance(val, float):  # NaN = random x-position
+                    text = "—"
+                else:
+                    text = str(val)
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(r_idx, c_idx, item)
 
         self.table.resizeColumnsToContents()
+        self.summary_export_btn.setEnabled(True)
 
     # ── Plots ─────────────────────────────────────────────────────────────
 
@@ -1059,7 +1159,7 @@ class ResultsPanel(QTabWidget):
 
     def draw_gas_props(self, csv_path: str):
         try:
-            df = pd.read_csv(csv_path)
+            df = pd.read_csv(csv_path, comment='#')
         except Exception:  # noqa: BLE001
             return
         df.columns = [c.strip() for c in df.columns]
@@ -1077,9 +1177,28 @@ class ResultsPanel(QTabWidget):
             self._gas_canvas.Clear()
             self._gas_canvas.Divide(3, 3)
             self._gas_objects.clear()
+            ROOT.TGaxis.SetMaxDigits(0)   # force scientific notation for all values < 1
 
             e = (df["e_field_Vcm"] / 1000.0).to_numpy().astype("f8")   # kV/cm
             n = len(e)
+
+            # Derive ion species and carrier gas from the "# ion_mobility: <file>"
+            # comment written by ExportGasProps at the top of the props CSV.
+            # File naming convention: IonMobility_<ION>_<GAS>.txt
+            _ion_label, _gas_suffix = "ion", ""
+            try:
+                with open(csv_path) as _f:
+                    _first = _f.readline().strip()
+                    if _first.startswith("# ion_mobility:"):
+                        _stem = Path(_first.split(":", 1)[1].strip()).stem  # "IonMobility_CO2+_CO2"
+                        _parts = _stem[len("IonMobility_"):].split("_", 1)  # ["CO2+", "CO2"]
+                        if len(_parts) == 2:
+                            _ion_label  = _parts[0]            # e.g. "CO2+"
+                            _gas_suffix = " in " + _parts[1]   # e.g. " in CO2"
+            except Exception:  # noqa: BLE001
+                pass
+            _ion_title_v  = f"{_ion_label} drift velocity{_gas_suffix}"
+            _ion_title_mu = f"{_ion_label} mobility{_gas_suffix}"
 
             panels = [
                 # (pad, col,               take_abs, logy, title, xlabel, ylabel)
@@ -1102,14 +1221,18 @@ class ResultsPanel(QTabWidget):
                  "Effective gain (#alpha-#eta)",
                  "E [kV/cm]", "(#alpha-#eta) [cm^{-1}]"),
                 (7, "v_ion_cm_per_us",  True,  False,
-                 "CO_{2}^{+} drift velocity (Ar:CO_{2})",
+                 _ion_title_v,
                  "E [kV/cm]", "|v_{ion}| [cm/#mus]"),
                 (8, "mu_ion_cm2_per_Vus", False, False,
-                 "CO_{2}^{+} mobility (Ar:CO_{2})",
-                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot#mus)]"),
+                 _ion_title_mu,
+                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot #mu s)]"),
             ]
             for pad_num, col, take_abs, logy, title, xlabel, ylabel in panels:
                 self._gas_canvas.cd(pad_num)
+                ROOT.gPad.SetLeftMargin(0.18)
+                ROOT.gPad.SetBottomMargin(0.16)
+                ROOT.gPad.SetRightMargin(0.04)
+                ROOT.gPad.SetTopMargin(0.08)
                 ROOT.gPad.SetLogx()
                 ROOT.gPad.SetGrid()
                 if logy:
@@ -1149,6 +1272,7 @@ class ResultsPanel(QTabWidget):
             self._gas_canvas.cd(9)   # leave pad 9 empty
 
             self._gas_canvas.Update()
+            ROOT.TGaxis.SetMaxDigits(5)   # restore ROOT default so other tabs are unaffected
             self._root_timer.start()
 
             self.gas_export_root_btn.setEnabled(True)
@@ -1166,7 +1290,7 @@ class ResultsPanel(QTabWidget):
             return
         try:
             import ROOT  # noqa: PLC0415
-            df = pd.read_csv(self._gas_props_csv)
+            df = pd.read_csv(self._gas_props_csv, comment='#')
             df.columns = [c.strip() for c in df.columns]
             e = (df["e_field_Vcm"] / 1000.0).to_numpy().astype("f8")
             f = ROOT.TFile(path, "RECREATE")
@@ -1184,7 +1308,7 @@ class ResultsPanel(QTabWidget):
                 ("v_ion", "v_ion_cm_per_us",     True,
                  "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mus]"),
                 ("mu",    "mu_ion_cm2_per_Vus",  False,
-                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot#mus)]"),
+                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot #mu s)]"),
             ]
             for gname, col, take_abs, title in spec:
                 if col not in df.columns:
@@ -1218,6 +1342,18 @@ class ResultsPanel(QTabWidget):
         import shutil
         shutil.copy2(self._gas_props_csv, path)
         self.append_log(f"[GUI] Magboltz CSV exported to {path}")
+
+    def _on_summary_export_csv(self) -> None:
+        csv_path = getattr(self, "_summary_csv_path", None)
+        if not csv_path or not Path(csv_path).exists():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export summary as CSV", "summary.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        import shutil
+        shutil.copy2(csv_path, path)
+        self.append_log(f"[GUI] Summary CSV exported to {path}")
 
     # ── Waveforms ─────────────────────────────────────────────────────────
 
@@ -1309,9 +1445,10 @@ class ResultsPanel(QTabWidget):
         self.wave_xpos_combo.blockSignals(False)
         self.charge_dist_combo.blockSignals(False)
         self.charge_xpos_combo.blockSignals(False)
-        # Triggering wave also syncs charge (dist + xpos + slider)
+        # Triggering wave syncs charge combos + slider; then explicitly draw charge canvas
         if self.wave_dist_combo.count():
-            self._on_wave_dist_changed(0)
+            self._on_wave_dist_changed(0)   # syncs charge combos + creates wave canvas
+            self._update_charge_plot()      # create charge canvas on initial load
             self._root_timer.start()
 
     # ── Waveform/Charge sync helpers ──────────────────────────────────────────
@@ -1618,7 +1755,7 @@ class ResultsPanel(QTabWidget):
         self._track_geom = None
         self._tracks_canvas  = None   # force recreation for the new run
         self._trk_zoom_scale = 1.0
-        self._trk_view_phi   = 30.0
+        self._trk_view_phi   = 32.0
         self._trk_view_theta = 30.0
         self._trk_pan_x = 0.0
         self._trk_pan_y = 0.0
@@ -1904,8 +2041,11 @@ class ResultsPanel(QTabWidget):
             px = np.asarray(data["primary_x"][ev])
             py = np.asarray(data["primary_y"][ev])
             pz = np.asarray(data["primary_z"][ev])
-            for _seg in _clip(px, py, pz):
-                _pl3(*_seg, ROOT.kBlue + 1, 2, alpha=0.65)
+            # No Python-level clipping — always draw the full track so it
+            # remains visible at any zoom level. ROOT's 3D→2D projector handles
+            # clipping at the pad boundary automatically.
+            if len(px) >= 2:
+                _pl3(px, py, pz, ROOT.kBlue + 1, 2, alpha=0.65)
 
             # ── Avalanche cloud (orange markers) ──────────────────────────────
             cx_ = np.asarray(data["cloud_x"][ev])
@@ -2332,6 +2472,26 @@ class MainWindow(QMainWindow):
         if self._runner and self._runner.isRunning():
             self._runner.stop()
             self._runner.wait(3000)
+
+        # Stop ROOT timer and close all ROOT TCanvas windows before Qt tears
+        # down its macOS Cocoa layer — prevents "drawable not found" crash.
+        rp = self.results_panel
+        rp._root_timer.stop()
+        try:
+            import ROOT  # noqa: PLC0415
+            for _canvas in [rp._root_canvas, rp._charge_canvas,
+                            rp._tracks_canvas, rp._efield_root_canvas,
+                            rp._gas_canvas]:
+                try:
+                    if (_canvas is not None and
+                            ROOT.gROOT.GetListOfCanvases()
+                                      .FindObject(_canvas.GetName())):
+                        _canvas.Close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
         super().closeEvent(event)
 
 
@@ -2344,7 +2504,10 @@ def main():
     app.setApplicationName("TGC Simulation")
     win = MainWindow()
     win.show()
-    sys.exit(app.exec_())
+    code = app.exec_()
+    # os._exit bypasses Python/ROOT atexit destructors that crash on macOS
+    # when ROOT's Cocoa layer outlives Qt's autorelease pool.
+    os._exit(code)
 
 
 if __name__ == "__main__":
