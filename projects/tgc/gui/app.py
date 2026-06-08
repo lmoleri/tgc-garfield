@@ -711,6 +711,7 @@ class ResultsPanel(QTabWidget):
         self._track_geom:   dict | None = None
         self._tracks_canvas  = None   # ROOT TCanvas for 3D tracks
         self._tracks_objects: list = []
+        self._trk_legend_objects: list = []   # TLegend + proxy objects (prevent Python GC)
         self._trk_zoom_scale: float = 1.0   # <1 zoomed in, >1 zoomed out
         self._trk_view_phi:   float = 32.0  # TPad azimuthal angle (32° avoids Y-label inside box)
         self._trk_view_theta: float = 30.0  # TPad elevation angle (ROOT default)
@@ -1169,12 +1170,10 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._gas_canvas, "tgc_magboltz"):
-                self._gas_canvas = None
-            if self._gas_canvas is None:
-                self._gas_canvas = ROOT.TCanvas(
-                    "tgc_magboltz", "Magboltz Gas Properties", 1200, 900)
-            self._gas_canvas.Clear()
+            if self._root_canvas_alive(self._gas_canvas, "tgc_magboltz"):
+                self._gas_canvas.Close()
+            self._gas_canvas = ROOT.TCanvas(
+                "tgc_magboltz", "Magboltz Gas Properties", 1200, 900)
             self._gas_canvas.Divide(3, 3)
             self._gas_objects.clear()
             ROOT.TGaxis.SetMaxDigits(0)   # force scientific notation for all values < 1
@@ -1195,6 +1194,16 @@ class ResultsPanel(QTabWidget):
                         if len(_parts) == 2:
                             _ion_label  = _parts[0]            # e.g. "CO2+"
                             _gas_suffix = " in " + _parts[1]   # e.g. " in CO2"
+                    else:
+                        # Old CSV (no comment) — binary always uses IonMobility_CO2+_CO2.txt
+                        _default = (GARFIELD_INSTALL / "share" / "Garfield"
+                                    / "Data" / "IonMobility_CO2+_CO2.txt")
+                        if _default.exists():
+                            _stem = _default.stem  # "IonMobility_CO2+_CO2"
+                            _parts = _stem[len("IonMobility_"):].split("_", 1)
+                            if len(_parts) == 2:
+                                _ion_label  = _parts[0]
+                                _gas_suffix = " in " + _parts[1]
             except Exception:  # noqa: BLE001
                 pass
             _ion_title_v  = f"{_ion_label} drift velocity{_gas_suffix}"
@@ -1204,7 +1213,7 @@ class ResultsPanel(QTabWidget):
                 # (pad, col,               take_abs, logy, title, xlabel, ylabel)
                 (1, "vd_cm_per_us",     True,  False,
                  "Electron drift velocity",
-                 "E [kV/cm]", "|v_{d}| [cm/#mus]"),
+                 "E [kV/cm]", "|v_{d}| [cm/#mu{}s]"),
                 (2, "alpha_per_cm",     False, True,
                  "Townsend #alpha",
                  "E [kV/cm]", "#alpha [cm^{-1}]"),
@@ -1222,10 +1231,10 @@ class ResultsPanel(QTabWidget):
                  "E [kV/cm]", "(#alpha-#eta) [cm^{-1}]"),
                 (7, "v_ion_cm_per_us",  True,  False,
                  _ion_title_v,
-                 "E [kV/cm]", "|v_{ion}| [cm/#mus]"),
+                 "E [kV/cm]", "|v_{ion}| [cm/#mu{}s]"),
                 (8, "mu_ion_cm2_per_Vus", False, False,
                  _ion_title_mu,
-                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot #mu s)]"),
+                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot{}#mu{}s)]"),
             ]
             for pad_num, col, take_abs, logy, title, xlabel, ylabel in panels:
                 self._gas_canvas.cd(pad_num)
@@ -1296,7 +1305,7 @@ class ResultsPanel(QTabWidget):
             f = ROOT.TFile(path, "RECREATE")
             spec = [
                 ("vd",    "vd_cm_per_us",       True,
-                 "Electron drift velocity;E [kV/cm];|v_{d}| [cm/#mus]"),
+                 "Electron drift velocity;E [kV/cm];|v_{d}| [cm/#mu{}s]"),
                 ("alpha", "alpha_per_cm",        False,
                  "Townsend #alpha;E [kV/cm];#alpha [cm^{-1}]"),
                 ("eta",   "eta_per_cm",          False,
@@ -1306,9 +1315,9 @@ class ResultsPanel(QTabWidget):
                 ("dt",    "dt_sqrtcm",           False,
                  "Trans. diffusion;E [kV/cm];D_{T} [cm^{0.5}]"),
                 ("v_ion", "v_ion_cm_per_us",     True,
-                 "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mus]"),
+                 "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mu{}s]"),
                 ("mu",    "mu_ion_cm2_per_Vus",  False,
-                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot #mu s)]"),
+                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot{}#mu{}s)]"),
             ]
             for gname, col, take_abs, title in spec:
                 if col not in df.columns:
@@ -2091,6 +2100,39 @@ class ResultsPanel(QTabWidget):
                     col = ROOT.kGray + 1     # absorbed / out of window
                 for _seg in _clip(xs, ys, zs):
                     _pl3(*_seg, col, 1, alpha=0.55)
+
+            # ── Legend ────────────────────────────────────────────────────────
+            self._trk_legend_objects.clear()
+
+            def _mk_line(color: int, width: int = 1) -> object:
+                ln = ROOT.TLine()
+                ln.SetLineColor(color)
+                ln.SetLineWidth(width)
+                return ln
+
+            def _mk_marker(color: int) -> object:
+                mk = ROOT.TMarker()
+                mk.SetMarkerColor(color)
+                mk.SetMarkerStyle(7)
+                mk.SetMarkerSize(1.2)
+                return mk
+
+            _leg_proxies = [
+                (_mk_line(ROOT.kBlue + 1, 2),  "Primary e^{-}",          "L"),
+                (_mk_marker(ROOT.kOrange + 1), "Avalanche",               "P"),
+                (_mk_line(ROOT.kGreen + 2),    "Ion #rightarrow readout", "L"),
+                (_mk_line(ROOT.kMagenta),      "Ion #rightarrow other",   "L"),
+                (_mk_line(ROOT.kGray + 1),     "Ion (absorbed)",          "L"),
+            ]
+            leg = ROOT.TLegend(0.70, 0.76, 0.99, 0.97)
+            leg.SetBorderSize(0)
+            leg.SetFillColorAlpha(ROOT.kWhite, 0.75)
+            leg.SetTextSize(0.028)
+            for _proxy, _label, _opt in _leg_proxies:
+                leg.AddEntry(_proxy, _label, _opt)
+            leg.Draw()
+            self._trk_legend_objects = [leg] + [p for p, _, _ in _leg_proxies]
+            # ──────────────────────────────────────────────────────────────────
 
             self._tracks_canvas.Update()
 
