@@ -19,16 +19,16 @@
       -0.7,
       0.7
     ],
-    "x_positions_cm": null
+    "x_position_cm": 0.0
   },
   "gas": {
     "temperature_K": 293.15,
-    "pressure_Torr": 760.0,
+    "pressure_Torr": 750.0,
     "enable_penning": true,
     "n_magboltz_collisions": 10,
     "w_value_eV": 26.0,
     "max_electron_energy_eV": 2000.0,
-    "n_field_points": 20,
+    "n_field_points": 50,
     "e_field_max_vcm": 400000.0
   },
   "simulation": {

@@ -444,6 +444,46 @@ Config LoadConfig(const fs::path& path) {
 
 // ─── Gas setup ────────────────────────────────────────────────────────────────
 
+static void ExportGasProps(MediumMagboltz& gas, const std::string& outPath) {
+  std::vector<double> efields, bfields, angles;
+  gas.GetFieldGrid(efields, bfields, angles);
+
+  std::ofstream f(outPath);
+  if (!f) {
+    std::cerr << "  Warning: could not write gas properties to " << outPath << "\n";
+    return;
+  }
+  f << "e_field_Vcm,vd_cm_per_us,alpha_per_cm,eta_per_cm,"
+       "dl_sqrtcm,dt_sqrtcm,v_ion_cm_per_us,mu_ion_cm2_per_Vus\n";
+
+  for (double E : efields) {
+    double vx = 0, vy = 0, vz = 0;
+    gas.ElectronVelocity(E, 0, 0, 0, 0, 0, vx, vy, vz);
+    double alpha = 0, eta = 0, dl = 0, dt = 0;
+    gas.ElectronTownsend(E, 0, 0, 0, 0, 0, alpha);
+    gas.ElectronAttachment(E, 0, 0, 0, 0, 0, eta);
+    gas.ElectronDiffusion(E, 0, 0, 0, 0, 0, dl, dt);
+
+    double v_ion = 0, mu_ion = 0;
+    double vix = 0, viy = 0, viz = 0;
+    if (gas.IonVelocity(E, 0, 0, 0, 0, 0, vix, viy, viz)) {
+      v_ion  = std::abs(vix) * 1.e3;              // cm/ns → cm/μs
+      mu_ion = (E > 0.) ? v_ion / E : 0.;         // cm/μs / (V/cm) = cm²/(V·μs)
+    }
+
+    f << std::scientific << std::setprecision(6)
+      << E       << ","
+      << vx * 1.e3 << ","   // cm/ns → cm/μs
+      << alpha   << ","
+      << eta     << ","
+      << dl      << ","
+      << dt      << ","
+      << v_ion   << ","
+      << mu_ion  << "\n";
+  }
+  std::cout << "  Gas properties exported to: " << outPath << "\n";
+}
+
 void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   gas.SetTemperature(cfg.temperatureK);
   gas.SetPressure(cfg.pressureTorr);
@@ -500,6 +540,9 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   } else {
     std::cerr << "  Warning: GARFIELD_INSTALL not set; ion mobility not loaded.\n";
   }
+
+  const std::string propsFile = gasFile.substr(0, gasFile.size() - 4) + "_props.csv";
+  ExportGasProps(gas, propsFile);
 }
 
 // ─── Geometry and sensor setup ────────────────────────────────────────────────

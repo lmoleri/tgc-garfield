@@ -75,6 +75,11 @@ def derive_gas_filename(gas: dict) -> str:
     return f"ar70_co2_30_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen}.gas"
 
 
+def derive_gas_props_filename(gas: dict) -> str:
+    """Return the sidecar CSV filename for Magboltz transport properties."""
+    return derive_gas_filename(gas).replace(".gas", "_props.csv")
+
+
 # ---------------------------------------------------------------------------
 # Background simulation runner
 # ---------------------------------------------------------------------------
@@ -635,6 +640,10 @@ class ResultsPanel(QTabWidget):
         sel_h.addWidget(QLabel("Distance:"))
         self.wave_dist_combo = QComboBox()
         sel_h.addWidget(self.wave_dist_combo)
+        sel_h.addSpacing(8)
+        sel_h.addWidget(QLabel("X pos:"))
+        self.wave_xpos_combo = QComboBox()
+        sel_h.addWidget(self.wave_xpos_combo)
         sel_h.addSpacing(16)
         sel_h.addWidget(QLabel("Event:"))
         self.wave_event_slider = QSlider(Qt.Horizontal)
@@ -670,6 +679,7 @@ class ResultsPanel(QTabWidget):
         wave_layout.addStretch()
 
         self.wave_dist_combo.currentIndexChanged.connect(self._on_wave_dist_changed)
+        self.wave_xpos_combo.currentIndexChanged.connect(self._on_wave_xpos_changed)
         self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
 
         self.addTab(wave_widget, "Waveforms")
@@ -687,6 +697,10 @@ class ResultsPanel(QTabWidget):
         ch_sel_h.addWidget(QLabel("Distance:"))
         self.charge_dist_combo = QComboBox()
         ch_sel_h.addWidget(self.charge_dist_combo)
+        ch_sel_h.addSpacing(8)
+        ch_sel_h.addWidget(QLabel("X pos:"))
+        self.charge_xpos_combo = QComboBox()
+        ch_sel_h.addWidget(self.charge_xpos_combo)
         ch_sel_h.addSpacing(16)
         ch_sel_h.addWidget(QLabel("Event:"))
         self.charge_event_slider = QSlider(Qt.Horizontal)
@@ -710,6 +724,7 @@ class ResultsPanel(QTabWidget):
         charge_layout.addStretch()
 
         self.charge_dist_combo.currentIndexChanged.connect(self._on_charge_dist_changed)
+        self.charge_xpos_combo.currentIndexChanged.connect(self._on_charge_xpos_changed)
         self.charge_event_slider.valueChanged.connect(self._update_charge_plot)
 
         self.addTab(charge_widget, "Charges")
@@ -754,8 +769,8 @@ class ResultsPanel(QTabWidget):
 
         for _label, _phi, _theta, _rz in [
             ("Gap XY",   0,  90, False),  # theta=90 → camera along Z → sees X-Y
-            ("Top XZ",  90,   0, False),  # phi=90  → camera along Y → sees X-Z
-            ("Side YZ",  0,   0, False),  # phi=0   → camera along X → sees Y-Z
+            ("Top XZ",   0,   0, False),  # phi=0   → top down (along Y) → sees X-Z
+            ("Side YZ",  90,  0, False),  # phi=90  → camera along X → sees Y-Z
             ("3D",      30,  30, True),   # default perspective + reset zoom
         ]:
             _btn = QPushButton(_label)
@@ -923,6 +938,42 @@ class ResultsPanel(QTabWidget):
 
         self.addTab(efield_widget, "E-Field")
 
+        # ── Magboltz tab ──────────────────────────────────────────────────
+        self._gas_canvas = None
+        self._gas_objects: list = []
+        self._gas_props_csv: str | None = None
+
+        gas_widget = QWidget()
+        gas_layout = QVBoxLayout(gas_widget)
+        gas_layout.setContentsMargins(8, 6, 8, 6)
+        gas_layout.setSpacing(6)
+
+        exp_row = QWidget()
+        exp_h = QHBoxLayout(exp_row)
+        exp_h.setContentsMargins(0, 0, 0, 0)
+        self.gas_export_root_btn = QPushButton("Export as ROOT …")
+        self.gas_export_csv_btn  = QPushButton("Export as CSV …")
+        self.gas_export_root_btn.setEnabled(False)
+        self.gas_export_csv_btn.setEnabled(False)
+        exp_h.addWidget(self.gas_export_root_btn)
+        exp_h.addWidget(self.gas_export_csv_btn)
+        exp_h.addStretch()
+        gas_layout.addWidget(exp_row)
+
+        gas_hint = QLabel(
+            "ROOT canvas opens automatically when gas properties are available.\n"
+            "Right-click inside the ROOT window to zoom, change axes, or save."
+        )
+        gas_hint.setWordWrap(True)
+        gas_hint.setStyleSheet("color: grey; font-size: 11px;")
+        gas_layout.addWidget(gas_hint)
+        gas_layout.addStretch()
+
+        self.gas_export_root_btn.clicked.connect(self._on_gas_export_root)
+        self.gas_export_csv_btn.clicked.connect(self._on_gas_export_csv)
+
+        self.addTab(gas_widget, "Magboltz")
+
         # — timer to keep ROOT canvas responsive —
         self._root_timer = QTimer(self)
         self._root_timer.setInterval(100)
@@ -1006,6 +1057,168 @@ class ResultsPanel(QTabWidget):
         self.plots_canvas.figure.tight_layout()
         self.plots_canvas.draw()
 
+    def draw_gas_props(self, csv_path: str):
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:  # noqa: BLE001
+            return
+        df.columns = [c.strip() for c in df.columns]
+        self._gas_props_csv = csv_path
+
+        try:
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
+
+            if not self._root_canvas_alive(self._gas_canvas, "tgc_magboltz"):
+                self._gas_canvas = None
+            if self._gas_canvas is None:
+                self._gas_canvas = ROOT.TCanvas(
+                    "tgc_magboltz", "Magboltz Gas Properties", 1200, 900)
+            self._gas_canvas.Clear()
+            self._gas_canvas.Divide(3, 3)
+            self._gas_objects.clear()
+
+            e = (df["e_field_Vcm"] / 1000.0).to_numpy().astype("f8")   # kV/cm
+            n = len(e)
+
+            panels = [
+                # (pad, col,               take_abs, logy, title, xlabel, ylabel)
+                (1, "vd_cm_per_us",     True,  False,
+                 "Electron drift velocity",
+                 "E [kV/cm]", "|v_{d}| [cm/#mus]"),
+                (2, "alpha_per_cm",     False, True,
+                 "Townsend #alpha",
+                 "E [kV/cm]", "#alpha [cm^{-1}]"),
+                (3, "eta_per_cm",       False, True,
+                 "Attachment #eta",
+                 "E [kV/cm]", "#eta [cm^{-1}]"),
+                (4, "dl_sqrtcm",        False, False,
+                 "Long. diffusion D_{L}",
+                 "E [kV/cm]", "D_{L} [cm^{0.5}]"),
+                (5, "dt_sqrtcm",        False, False,
+                 "Trans. diffusion D_{T}",
+                 "E [kV/cm]", "D_{T} [cm^{0.5}]"),
+                (6, None,               False, True,
+                 "Effective gain (#alpha-#eta)",
+                 "E [kV/cm]", "(#alpha-#eta) [cm^{-1}]"),
+                (7, "v_ion_cm_per_us",  True,  False,
+                 "CO_{2}^{+} drift velocity (Ar:CO_{2})",
+                 "E [kV/cm]", "|v_{ion}| [cm/#mus]"),
+                (8, "mu_ion_cm2_per_Vus", False, False,
+                 "CO_{2}^{+} mobility (Ar:CO_{2})",
+                 "E [kV/cm]", "#mu [cm^{2}/(V#cdot#mus)]"),
+            ]
+            for pad_num, col, take_abs, logy, title, xlabel, ylabel in panels:
+                self._gas_canvas.cd(pad_num)
+                ROOT.gPad.SetLogx()
+                ROOT.gPad.SetGrid()
+                if logy:
+                    ROOT.gPad.SetLogy()
+
+                if col is None:
+                    # effective gain = alpha - eta
+                    if "alpha_per_cm" not in df.columns or "eta_per_cm" not in df.columns:
+                        continue
+                    yraw = (df["alpha_per_cm"] - df["eta_per_cm"]).to_numpy()
+                else:
+                    if col not in df.columns:
+                        continue
+                    yraw = df[col].to_numpy()
+                    if take_abs:
+                        yraw = np.abs(yraw)
+
+                mask = (yraw > 0) if logy else np.ones(n, dtype=bool)
+                xe = e[mask].astype("f8")
+                ye = yraw[mask].astype("f8")
+                if len(xe) == 0:
+                    continue
+
+                g = ROOT.TGraph(len(xe), xe, ye)
+                g.SetTitle(f"{title};{xlabel};{ylabel}")
+                g.SetLineColor(ROOT.kBlue + 1)
+                g.SetMarkerColor(ROOT.kBlue + 1)
+                g.SetMarkerStyle(20)
+                g.SetMarkerSize(0.5)
+                g.SetLineWidth(2)
+                g.Draw("ALP")
+                for _axis in (g.GetXaxis(), g.GetYaxis()):
+                    _axis.SetTitleSize(_axis.GetTitleSize() + 0.03)
+                    _axis.SetLabelSize(_axis.GetLabelSize() + 0.03)
+                self._gas_objects.append(g)
+
+            self._gas_canvas.cd(9)   # leave pad 9 empty
+
+            self._gas_canvas.Update()
+            self._root_timer.start()
+
+            self.gas_export_root_btn.setEnabled(True)
+            self.gas_export_csv_btn.setEnabled(True)
+
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] Magboltz ROOT canvas error: {exc}")
+
+    def _on_gas_export_root(self):
+        if not self._gas_props_csv:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Magboltz as ROOT", str(TGC_DIR), "ROOT files (*.root)")
+        if not path:
+            return
+        try:
+            import ROOT  # noqa: PLC0415
+            df = pd.read_csv(self._gas_props_csv)
+            df.columns = [c.strip() for c in df.columns]
+            e = (df["e_field_Vcm"] / 1000.0).to_numpy().astype("f8")
+            f = ROOT.TFile(path, "RECREATE")
+            spec = [
+                ("vd",    "vd_cm_per_us",       True,
+                 "Electron drift velocity;E [kV/cm];|v_{d}| [cm/#mus]"),
+                ("alpha", "alpha_per_cm",        False,
+                 "Townsend #alpha;E [kV/cm];#alpha [cm^{-1}]"),
+                ("eta",   "eta_per_cm",          False,
+                 "Attachment #eta;E [kV/cm];#eta [cm^{-1}]"),
+                ("dl",    "dl_sqrtcm",           False,
+                 "Long. diffusion;E [kV/cm];D_{L} [cm^{0.5}]"),
+                ("dt",    "dt_sqrtcm",           False,
+                 "Trans. diffusion;E [kV/cm];D_{T} [cm^{0.5}]"),
+                ("v_ion", "v_ion_cm_per_us",     True,
+                 "Ion drift velocity;E [kV/cm];|v_{ion}| [cm/#mus]"),
+                ("mu",    "mu_ion_cm2_per_Vus",  False,
+                 "Ion mobility;E [kV/cm];#mu [cm^{2}/(V#cdot#mus)]"),
+            ]
+            for gname, col, take_abs, title in spec:
+                if col not in df.columns:
+                    continue
+                y = df[col].to_numpy().astype("f8")
+                if take_abs:
+                    y = np.abs(y)
+                g = ROOT.TGraph(len(e), e, y)
+                g.SetTitle(title)
+                g.SetName(gname)
+                g.Write()
+            if "alpha_per_cm" in df.columns and "eta_per_cm" in df.columns:
+                eff = (df["alpha_per_cm"] - df["eta_per_cm"]).to_numpy().astype("f8")
+                g = ROOT.TGraph(len(e), e, eff)
+                g.SetTitle("Effective gain;E [kV/cm];(#alpha-#eta) [cm^{-1}]")
+                g.SetName("eff_gain")
+                g.Write()
+            f.Close()
+            self.append_log(f"[GUI] Magboltz data exported to {path}")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT export failed: {exc}")
+            QMessageBox.warning(self.parent(), "Export failed", str(exc))
+
+    def _on_gas_export_csv(self):
+        if not self._gas_props_csv or not Path(self._gas_props_csv).exists():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Magboltz as CSV", str(TGC_DIR), "CSV files (*.csv)")
+        if not path:
+            return
+        import shutil
+        shutil.copy2(self._gas_props_csv, path)
+        self.append_log(f"[GUI] Magboltz CSV exported to {path}")
+
     # ── Waveforms ─────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1045,8 +1258,12 @@ class ResultsPanel(QTabWidget):
         self._waveform_data.clear()
         self.wave_dist_combo.blockSignals(True)
         self.wave_dist_combo.clear()
+        self.wave_xpos_combo.blockSignals(True)
+        self.wave_xpos_combo.clear()
         self.charge_dist_combo.blockSignals(True)
         self.charge_dist_combo.clear()
+        self.charge_xpos_combo.blockSignals(True)
+        self.charge_xpos_combo.clear()
 
         try:
             with uproot.open(root_path) as f:
@@ -1055,7 +1272,10 @@ class ResultsPanel(QTabWidget):
                     if k.split("/")[0].startswith("dist_")
                 })
                 for key in dist_keys:
-                    label = key.removeprefix("dist_").replace("p", ".").replace("mm", " mm")
+                    rest = key.removeprefix("dist_")
+                    dist_raw, sep, xpos_raw = rest.partition("_x")
+                    dist_label = dist_raw.replace("p", ".").replace("mm", " mm")
+                    xpos_label = xpos_raw.replace("p", ".").replace("mm", " mm") if sep else "—"
                     try:
                         pa     = f[f"{key}/p_anode_signal"]
                         pc     = f[f"{key}/p_cathode_signal"]
@@ -1069,31 +1289,82 @@ class ResultsPanel(QTabWidget):
                         anode   = np.stack(tree["anode"].array(library="np"))
                         cathode = np.stack(tree["cathode"].array(library="np"))
 
-                        self._waveform_data[label] = {
+                        self._waveform_data.setdefault(dist_label, {})[xpos_label] = {
                             "times":   times,
                             "anode":   anode,
                             "cathode": cathode,
                             "mean_a":  mean_a,
                             "mean_c":  mean_c,
                         }
-                        self.wave_dist_combo.addItem(label)
-                        self.charge_dist_combo.addItem(label)
+                        if self.wave_dist_combo.findText(dist_label) == -1:
+                            self.wave_dist_combo.addItem(dist_label)
+                        if self.charge_dist_combo.findText(dist_label) == -1:
+                            self.charge_dist_combo.addItem(dist_label)
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file: {exc}")
 
         self.wave_dist_combo.blockSignals(False)
+        self.wave_xpos_combo.blockSignals(False)
         self.charge_dist_combo.blockSignals(False)
+        self.charge_xpos_combo.blockSignals(False)
+        # Triggering wave also syncs charge (dist + xpos + slider)
         if self.wave_dist_combo.count():
             self._on_wave_dist_changed(0)
             self._root_timer.start()
-        if self.charge_dist_combo.count():
-            self._on_charge_dist_changed(0)
 
-    def _on_wave_dist_changed(self, index: int):
-        label = self.wave_dist_combo.currentText()
-        data  = self._waveform_data.get(label)
+    # ── Waveform/Charge sync helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _sorted_xpos(xpos_dict: dict) -> list:
+        """Return x-position labels sorted numerically; '—' (random) sorts first."""
+        def _key(s):
+            try:
+                return float(s.replace(" mm", ""))
+            except ValueError:
+                return -1e9
+        return sorted(xpos_dict.keys(), key=_key)
+
+    def _rebuild_charge_xpos(self):
+        """Repopulate charge_xpos_combo to match the current charge_dist selection."""
+        dist_label = self.charge_dist_combo.currentText()
+        xpos_dict  = self._waveform_data.get(dist_label, {})
+        self.charge_xpos_combo.blockSignals(True)
+        self.charge_xpos_combo.clear()
+        for xp in self._sorted_xpos(xpos_dict):
+            self.charge_xpos_combo.addItem(xp)
+        self.charge_xpos_combo.blockSignals(False)
+
+    def _rebuild_wave_xpos(self):
+        """Repopulate wave_xpos_combo to match the current wave_dist selection."""
+        dist_label = self.wave_dist_combo.currentText()
+        xpos_dict  = self._waveform_data.get(dist_label, {})
+        self.wave_xpos_combo.blockSignals(True)
+        self.wave_xpos_combo.clear()
+        for xp in self._sorted_xpos(xpos_dict):
+            self.wave_xpos_combo.addItem(xp)
+        self.wave_xpos_combo.blockSignals(False)
+
+    def _sync_charge_slider(self):
+        """Update charge_event_slider range for the current (charge_dist, charge_xpos)."""
+        dist_label = self.charge_dist_combo.currentText()
+        xpos_label = self.charge_xpos_combo.currentText()
+        data = self._waveform_data.get(dist_label, {}).get(xpos_label)
+        if data is None:
+            return
+        n = len(data["anode"])
+        self.charge_event_slider.blockSignals(True)
+        self.charge_event_slider.setMaximum(max(0, n - 1))
+        self.charge_event_slider.setValue(0)
+        self.charge_event_slider.blockSignals(False)
+        self.charge_event_label.setText(f"1 / {n}")
+
+    def _sync_wave_slider(self):
+        """Update wave_event_slider range for the current (wave_dist, wave_xpos)."""
+        dist_label = self.wave_dist_combo.currentText()
+        xpos_label = self.wave_xpos_combo.currentText()
+        data = self._waveform_data.get(dist_label, {}).get(xpos_label)
         if data is None:
             return
         n = len(data["anode"])
@@ -1102,12 +1373,51 @@ class ResultsPanel(QTabWidget):
         self.wave_event_slider.setValue(0)
         self.wave_event_slider.blockSignals(False)
         self.wave_event_label.setText(f"1 / {n}")
+
+    def _on_wave_dist_changed(self, index: int):
+        dist_label = self.wave_dist_combo.currentText()
+        xpos_dict  = self._waveform_data.get(dist_label, {})
+
+        # Rebuild xpos combo for this distance
+        self.wave_xpos_combo.blockSignals(True)
+        self.wave_xpos_combo.clear()
+        for xp in self._sorted_xpos(xpos_dict):
+            self.wave_xpos_combo.addItem(xp)
+        self.wave_xpos_combo.blockSignals(False)
+
+        # Sync charge tab (blocked)
+        self.charge_dist_combo.blockSignals(True)
+        self.charge_dist_combo.setCurrentIndex(index)
+        self.charge_dist_combo.blockSignals(False)
+        self._rebuild_charge_xpos()
+
+        self._on_wave_xpos_changed(0)
+
+    def _on_wave_xpos_changed(self, index: int):
+        dist_label = self.wave_dist_combo.currentText()
+        xpos_label = self.wave_xpos_combo.currentText()
+        data = self._waveform_data.get(dist_label, {}).get(xpos_label)
+        if data is None:
+            return
+        n = len(data["anode"])
+        self.wave_event_slider.blockSignals(True)
+        self.wave_event_slider.setMaximum(max(0, n - 1))
+        self.wave_event_slider.setValue(0)
+        self.wave_event_slider.blockSignals(False)
+        self.wave_event_label.setText(f"1 / {n}")
+        # Sync charge xpos (blocked) and update its slider
+        self.charge_xpos_combo.blockSignals(True)
+        self.charge_xpos_combo.setCurrentIndex(index)
+        self.charge_xpos_combo.blockSignals(False)
+        self._sync_charge_slider()
         self._update_waveform_plot()
 
     def _update_waveform_plot(self):
         """Draw the selected event in a ROOT TCanvas (anode top, cathode bottom)."""
-        label = self.wave_dist_combo.currentText()
-        data  = self._waveform_data.get(label)
+        dist_label = self.wave_dist_combo.currentText()
+        xpos_label = self.wave_xpos_combo.currentText()
+        data  = self._waveform_data.get(dist_label, {}).get(xpos_label)
+        label = f"{dist_label}  x={xpos_label}" if xpos_label != "—" else dist_label
         if data is None:
             return
 
@@ -1182,8 +1492,28 @@ class ResultsPanel(QTabWidget):
     # ── Charges (cumulative integral) ─────────────────────────────────────────
 
     def _on_charge_dist_changed(self, index: int):
-        label = self.charge_dist_combo.currentText()
-        data  = self._waveform_data.get(label)
+        dist_label = self.charge_dist_combo.currentText()
+        xpos_dict  = self._waveform_data.get(dist_label, {})
+
+        # Rebuild xpos combo for this distance
+        self.charge_xpos_combo.blockSignals(True)
+        self.charge_xpos_combo.clear()
+        for xp in self._sorted_xpos(xpos_dict):
+            self.charge_xpos_combo.addItem(xp)
+        self.charge_xpos_combo.blockSignals(False)
+
+        # Sync wave tab (blocked)
+        self.wave_dist_combo.blockSignals(True)
+        self.wave_dist_combo.setCurrentIndex(index)
+        self.wave_dist_combo.blockSignals(False)
+        self._rebuild_wave_xpos()
+
+        self._on_charge_xpos_changed(0)
+
+    def _on_charge_xpos_changed(self, index: int):
+        dist_label = self.charge_dist_combo.currentText()
+        xpos_label = self.charge_xpos_combo.currentText()
+        data = self._waveform_data.get(dist_label, {}).get(xpos_label)
         if data is None:
             return
         n = len(data["anode"])
@@ -1192,12 +1522,19 @@ class ResultsPanel(QTabWidget):
         self.charge_event_slider.setValue(0)
         self.charge_event_slider.blockSignals(False)
         self.charge_event_label.setText(f"1 / {n}")
+        # Sync wave xpos (blocked) and update its slider
+        self.wave_xpos_combo.blockSignals(True)
+        self.wave_xpos_combo.setCurrentIndex(index)
+        self.wave_xpos_combo.blockSignals(False)
+        self._sync_wave_slider()
         self._update_charge_plot()
 
     def _update_charge_plot(self):
         """Draw cumulative charge integrals Q(t) in a ROOT TCanvas (anode top, cathode bottom)."""
-        label = self.charge_dist_combo.currentText()
-        data  = self._waveform_data.get(label)
+        dist_label = self.charge_dist_combo.currentText()
+        xpos_label = self.charge_xpos_combo.currentText()
+        data  = self._waveform_data.get(dist_label, {}).get(xpos_label)
+        label = f"{dist_label}  x={xpos_label}" if xpos_label != "—" else dist_label
         if data is None:
             return
 
@@ -1451,6 +1788,22 @@ class ResultsPanel(QTabWidget):
                 1, pz - max_half * s, pz + max_half * s,
             )
             frame.SetStats(0)
+            # Dynamic margins: make the inner pad area square so ROOT maps the
+            # equal-range 3D cube without horizontal stretch, regardless of the
+            # actual Qt-determined canvas pixel size.
+            _cw = self._tracks_canvas.GetWw() or 900
+            _ch = self._tracks_canvas.GetWh() or 700
+            _top, _bottom = 0.05, 0.10
+            _ih  = _ch * (1.0 - _top - _bottom)         # inner height in px
+            _lr  = max(0.18, 1.0 - _ih / _cw)           # left+right fraction needed
+            self._tracks_canvas.SetTopMargin(_top)
+            self._tracks_canvas.SetBottomMargin(_bottom)
+            self._tracks_canvas.SetLeftMargin(_lr * 0.55)   # more left for y-label
+            self._tracks_canvas.SetRightMargin(_lr * 0.45)
+            # Push all axis titles away from their axis lines.
+            frame.GetXaxis().SetTitleOffset(1.6)
+            frame.GetYaxis().SetTitleOffset(2.5)
+            frame.GetZaxis().SetTitleOffset(1.6)
             frame.Draw()
             self._tracks_objects.append(frame)
 
@@ -1489,14 +1842,20 @@ class ResultsPanel(QTabWidget):
                 ln.Draw("SAME")
                 self._tracks_objects.append(ln)
 
-            # ── Cathode planes (rectangular outlines) ─────────────────────────
+            # ── Cathode planes (rectangular outlines, clipped to visible cube) ──
             _hr = max_half * s
             for y_cath, color in [(-gap, ROOT.kCyan - 7), (gap, ROOT.kYellow - 7)]:
                 if not (self._trk_pan_y - _hr <= y_cath <= self._trk_pan_y + _hr):
                     continue
-                cx = np.array([-x_half, x_half, x_half, -x_half, -x_half], "f4")
+                cx_min = max(-x_half, self._trk_pan_x - _hr)
+                cx_max = min(+x_half, self._trk_pan_x + _hr)
+                cz_min = max(-z_half, self._trk_pan_z - _hr)
+                cz_max = min(+z_half, self._trk_pan_z + _hr)
+                if cx_max <= cx_min or cz_max <= cz_min:
+                    continue  # cathode not in view
+                cx = np.array([cx_min, cx_max, cx_max, cx_min, cx_min], "f4")
                 cy = np.full(5, y_cath, "f4")
-                cz = np.array([-z_half, -z_half, z_half, z_half, -z_half], "f4")
+                cz = np.array([cz_min, cz_min, cz_max, cz_max, cz_min], "f4")
                 pl = ROOT.TPolyLine3D(5, cx, cy, cz)
                 pl.SetLineColor(color)
                 pl.SetLineWidth(2)
@@ -1505,35 +1864,41 @@ class ResultsPanel(QTabWidget):
 
             # ── Anode wires (cylinder wireframe, actual diameter, semi-transparent) ──
             _wire_alpha = 0.45
-            _n_sides = 6                                      # hexagonal approximation
+            _n_sides = 12                                     # 12-sided polygon approximation
             _angles = np.linspace(0.0, 2.0 * np.pi, _n_sides + 1)  # closed polygon
+            # z extent of wires clipped to the visible cube
+            _z_lo = max(-z_half, self._trk_pan_z - _hr)
+            _z_hi = min(+z_half, self._trk_pan_z + _hr)
             for x_w in x_wires:
                 if not (self._trk_pan_x - _hr <= x_w <= self._trk_pan_x + _hr):
                     continue
                 xs_c = (x_w + r_cm * np.cos(_angles)).astype("f4")
                 ys_c = (r_cm * np.sin(_angles)).astype("f4")
-                # two end rings
-                for z_end in (-z_half, z_half):
-                    zs_c = np.full(_n_sides + 1, z_end, "f4")
-                    ring = ROOT.TPolyLine3D(_n_sides + 1, xs_c, ys_c, zs_c)
-                    ring.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
-                    ring.SetLineWidth(1)
-                    ring.Draw("SAME")
-                    self._tracks_objects.append(ring)
-                # six longitudinal edges
-                for _a in _angles[:-1]:
-                    _xe = float(x_w + r_cm * np.cos(_a))
-                    _ye = float(r_cm * np.sin(_a))
-                    ln = ROOT.TPolyLine3D(
-                        2,
-                        np.array([_xe, _xe], "f4"),
-                        np.array([_ye, _ye], "f4"),
-                        np.array([-z_half, z_half], "f4"),
-                    )
-                    ln.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
-                    ln.SetLineWidth(1)
-                    ln.Draw("SAME")
-                    self._tracks_objects.append(ln)
+                if _z_hi > _z_lo:
+                    # end rings at the visible z boundaries — always within the
+                    # frame box, so the cross-section polygon is visible at any zoom
+                    for z_ring in (_z_lo, _z_hi):
+                        zs_c = np.full(_n_sides + 1, z_ring, "f4")
+                        ring = ROOT.TPolyLine3D(_n_sides + 1, xs_c, ys_c, zs_c)
+                        ring.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
+                        ring.SetLineWidth(1)
+                        ring.Draw("SAME")
+                        self._tracks_objects.append(ring)
+                # longitudinal edges — z extent clipped to visible range
+                if _z_hi > _z_lo:
+                    for _a in _angles[:-1]:
+                        _xe = float(x_w + r_cm * np.cos(_a))
+                        _ye = float(r_cm * np.sin(_a))
+                        ln = ROOT.TPolyLine3D(
+                            2,
+                            np.array([_xe, _xe], "f4"),
+                            np.array([_ye, _ye], "f4"),
+                            np.array([_z_lo, _z_hi], "f4"),
+                        )
+                        ln.SetLineColorAlpha(ROOT.kYellow + 1, _wire_alpha)
+                        ln.SetLineWidth(1)
+                        ln.Draw("SAME")
+                        self._tracks_objects.append(ln)
 
             # ── Primary electron drift (blue) ─────────────────────────────────
             px = np.asarray(data["primary_x"][ev])
@@ -1594,7 +1959,7 @@ class ResultsPanel(QTabWidget):
 
     def _trk_adjust_zoom(self, factor: float) -> None:
         """Scale the visible axis range and redraw (factor < 1 = zoom in)."""
-        self._trk_zoom_scale = max(0.05, min(20.0, self._trk_zoom_scale * factor))
+        self._trk_zoom_scale = max(0.005, min(20.0, self._trk_zoom_scale * factor))
         self._update_track_plot()
 
     def _trk_pan(self, axis: str, direction: int) -> None:
@@ -1718,12 +2083,16 @@ class ResultsPanel(QTabWidget):
 
             # ── Pad 1: XY plane (TH2F COLZ) ──────────────────────────────────
             self._efield_root_canvas.cd(1)
+            ROOT.gPad.SetLeftMargin(0.12)
+            ROOT.gPad.SetRightMargin(0.17)   # extra room for COLZ colour bar
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
             nx_v, ny_v = len(x), len(y)
             dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
             dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
             h2 = ROOT.TH2F(
                 "h_efield",
-                f"XY plane — {comp} [V/cm];x [cm];y [cm]",
+                f"XY plane - {comp} [V/cm];x [cm];y [cm]",
                 nx_v, x[0] - dx / 2, x[-1] + dx / 2,
                 ny_v, y[0] - dy / 2, y[-1] + dy / 2,
             )
@@ -1751,6 +2120,10 @@ class ResultsPanel(QTabWidget):
 
             # ── Pad 2: E(x) profile at y = y0 ────────────────────────────────
             self._efield_root_canvas.cd(2)
+            ROOT.gPad.SetLeftMargin(0.16)
+            ROOT.gPad.SetRightMargin(0.05)
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
             g_xz = ROOT.TGraph(len(x), x.astype("f8"), field[iy, :].astype("f8"))
             g_xz.SetTitle(
                 f"{comp} at y = {y[iy]:.3f} cm;x [cm];{comp} [V/cm]")
@@ -1762,6 +2135,10 @@ class ResultsPanel(QTabWidget):
 
             # ── Pad 3: E(y) profile at x = x0 ────────────────────────────────
             self._efield_root_canvas.cd(3)
+            ROOT.gPad.SetLeftMargin(0.16)
+            ROOT.gPad.SetRightMargin(0.05)
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
             g_zy = ROOT.TGraph(len(y), y.astype("f8"), field[:, ix].astype("f8"))
             g_zy.SetTitle(
                 f"{comp} at x = {x[ix]:.3f} cm;y [cm];{comp} [V/cm]")
@@ -1898,7 +2275,15 @@ class MainWindow(QMainWindow):
         self.results_panel.draw_plots(csv_path)
         self.results_panel.load_waveform_data(root_path)
         self.results_panel.load_track_data(root_path, run_dir)
+        self._try_load_gas_props()
         self.results_panel.setCurrentIndex(1)   # switch to Summary tab
+
+    def _try_load_gas_props(self):
+        """Load Magboltz properties CSV if it exists for the current gas config."""
+        gas_cfg = self.config_panel.to_config_dict().get("gas", {})
+        props_path = TGC_DIR / derive_gas_props_filename(gas_cfg)
+        if props_path.exists():
+            self.results_panel.draw_gas_props(str(props_path))
 
     def _on_run_failed(self, msg: str):
         self.act_run.setEnabled(True)
@@ -1922,6 +2307,7 @@ class MainWindow(QMainWindow):
             self.config_panel.load_from_dict(d)
             self._last_loaded_config_path = path
             self.statusBar().showMessage(f"Config loaded from {path}")
+            self._try_load_gas_props()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Load failed", str(exc))
 

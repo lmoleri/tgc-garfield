@@ -323,7 +323,7 @@ been built yet, the window opens with a warning in the title bar.
 │  TGC Simulation          [▶ Run]  [■ Stop]  [Load Config]  [Save Config]                │
 ├─────────────────────────────────┬───────────────────────────────────────────────────────┤
 │  ▼ Geometry                     │  [ Log | Summary | Plots | Waveforms |                │
-│    Wire pitch [cm]   0.18       │    Charge | E-Field | 3D Tracks ]                     │
+│    Wire pitch [cm]   0.18       │    Charge | E-Field | 3D Tracks | Magboltz ]           │
 │    Wire diameter [μm] 50        │                                                       │
 │    Gap [cm]          0.14       │  ← live output / results shown here                   │
 │    N wires           10         │                                                       │
@@ -359,16 +359,17 @@ been built yet, the window opens with a warning in the title bar.
 | **Log** | Live stdout stream from `tgc_sim`, auto-scrolling |
 | **Summary** | Table from `summary.csv` — one row per source distance |
 | **Plots** | 2 × 2 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, charge ratio, and avalanche size vs source distance (with SEM error bars) |
-| **Waveforms** | Mean anode and cathode current waveforms overlaid per distance, read directly from the ROOT file via uproot |
-| **Charge** | Integrated charge histograms (Q_anode, Q_cathode) per source distance, read from the ROOT file |
+| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display. Read directly from the ROOT file via uproot |
+| **Charge** | Integrated charge histograms (Q_anode, Q_cathode) per (distance, x-position) combination, with an x-position dropdown when applicable. Read from the ROOT file |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
-| **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (10 %), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent hexagonal tube wireframes at actual diameter; primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
+| **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
+| **Magboltz** | Gas transport-property viewer: reads the `_props.csv` sidecar file exported automatically alongside the `.gas` file. Displays electron drift velocity, Townsend α, attachment η, longitudinal and transverse diffusion coefficients, effective gain (α − η), ion drift velocity, and ion mobility as a function of E-field — all in one ROOT TCanvas (8 panels). Export buttons save the plots to a ROOT file or copy the CSV. Requires PyROOT |
 
 **▶ Run** starts the simulation in a background thread (the window stays fully
 responsive).  **■ Stop** sends SIGTERM.  **Load Config** / **Save Config** read and
 write `.json` files that are fully compatible with the CLI `--config` flag.
 
-> **Note:** The E-Field and 3D Tracks tabs open ROOT TCanvas windows and require
+> **Note:** The E-Field, 3D Tracks, and Magboltz tabs open ROOT TCanvas windows and require
 > PyROOT (ROOT importable from Python — available automatically when using the
 > conda ROOT installation described in the Build section above).
 
@@ -404,18 +405,18 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 |-----------------------|---------------|------|----------------------|-----------------------------------------------------------|
 | `energy_keV`          | float         | keV  | 5.9                  | Photon energy of the simulated X-ray source (Fe-55 K-alpha line). Determines the number of primary electrons via `N = round(E_photon[eV] / w_value_eV)` (≈227 for Fe-55 at 5.9 keV and W = 26 eV) |
 | `source_distances_mm` | float array   | mm   | [0.2, 0.5, 0.9, 1.2] | List of signed y-positions (mm) at which primary electrons are placed, measured from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). Each distance is a separate simulation run. Values are clamped to (−`gap_cm`×10, +`gap_cm`×10) |
-| `x_positions_cm`      | float array or null | cm | null           | Comma-separated list of fixed lateral (x) positions [cm] for the photon interaction point. `null` → uniform random over the wire array each event. One or more values → one simulation run per distance × x-position pair; ROOT directory named `dist_Nmm_xMmm/`. Backward-compatible with the old scalar `x_position_cm` key (wrapped into a one-element list) |
+| `x_positions_cm`      | float array or null | cm | 0.0            | Comma-separated list of fixed lateral (x) positions [cm] for the photon interaction point. `null` → uniform random over the wire array each event. One or more values → one simulation run per distance × x-position pair; ROOT directory named `dist_Nmm_xMmm/`. Backward-compatible with the old scalar `x_position_cm` key (wrapped into a one-element list) |
 
 ### `gas`
 
 | Key                     | Type   | Unit  | Default                   | Description                                      |
 |-------------------------|--------|-------|---------------------------|--------------------------------------------------|
 | `temperature_K`         | float  | K     | 293.15                    | Gas temperature passed to Magboltz. Affects gas number density (n ∝ 1/T at fixed pressure), which shifts drift velocity and Townsend coefficients. Must match physical detector conditions; 293.15 K = 20 °C |
-| `pressure_Torr`         | float  | Torr  | 760.0                     | Gas pressure passed to Magboltz. Together with temperature, sets gas density. 760 Torr = 1 atm. Reducing pressure increases mean free path and electron energy, raising gain |
+| `pressure_Torr`         | float  | Torr  | 750.0                     | Gas pressure passed to Magboltz. Together with temperature, sets gas density. 760 Torr = 1 atm. Reducing pressure increases mean free path and electron energy, raising gain |
 | `enable_penning`        | bool   | —     | true                      | Activates Penning transfer via `MediumMagboltz::EnablePenningTransfer()`. In Ar:CO2 70:30 this raises the effective Townsend coefficient by ~20–40 %, bringing simulated gain closer to measured values. Should be left on for this mixture |
 | `n_magboltz_collisions` | int    | —     | 10                        | Monte Carlo collision cycles Magboltz runs per E-field grid point. Higher values reduce statistical uncertainty in transport coefficients at the cost of longer gas-file generation. 2–5: smoke test; 10: default; 20–50: publication quality |
 | `max_electron_energy_eV`| float  | eV    | 2000.0                    | Upper energy bound for the Magboltz cross-section look-up table. Must exceed the maximum kinetic energy electrons reach near the wire (typically 500–1000 eV here). Too low a ceiling causes Magboltz to extrapolate, producing unphysical transport coefficients |
-| `n_field_points`        | int    | —     | 20                        | Number of logarithmically spaced E-field values at which Magboltz computes transport coefficients (from ~100 V/cm to `e_field_max_vcm`). More points give smoother interpolation; fewer points speed up gas-file generation |
+| `n_field_points`        | int    | —     | 50                        | Number of logarithmically spaced E-field values at which Magboltz computes transport coefficients (from ~100 V/cm to `e_field_max_vcm`). More points give smoother interpolation; fewer points speed up gas-file generation |
 | `e_field_max_vcm`       | float  | V/cm  | 400000.0                  | Upper E-field limit for the Magboltz transport table. Must exceed the peak near-wire field E_peak = V_wire / (r × (ln(pitch/(2π r)) + π gap/pitch)). For the default geometry E_peak ≈ 156 kV/cm (2.6× margin at the default 400 kV/cm). The binary prints E_peak at startup and warns when `e_field_max_vcm < E_peak`; recommends ≥ 1.5× margin. The GUI "Auto" button fills in 2× E_peak rounded to the next 50 kV/cm |
 | `w_value_eV`            | float  | eV    | 26.0                      | Mean energy to create one electron–ion pair in the gas mixture (W-value). Determines primary electron count: `N = round(energy_keV × 1000 / w_value_eV)`. The measured value for Ar:CO2 70:30 is ~26 eV |
 
@@ -435,6 +436,14 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 ## Output
 
 All output is written to `<out_dir>/V<voltage>V__n<n_events>/`.
+
+### Gas properties sidecar (`<gasfile>_props.csv`)
+
+When the gas is set up, `tgc_sim` automatically writes a `<gasfile>_props.csv` sidecar
+file next to the `.gas` file.  It contains 8 Magboltz transport coefficients (electron
+drift velocity, Townsend α, attachment η, longitudinal and transverse diffusion, effective
+gain α − η, ion drift velocity and ion mobility) sampled at each E-field grid point.
+This file is read by the **Magboltz** tab in the GUI.
 
 ### ROOT file (`tgc_sim.root`)
 
