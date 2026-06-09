@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -323,6 +324,7 @@ void WriteJsonFile(const fs::path& p, const json& payload) {
 struct CliOptions {
   fs::path configPath{"config/default_tgc.json"};
   fs::path outDir{"results"};
+  std::string runName;                    // empty = auto-generate from config
   std::optional<double> singleDistanceMm;
 };
 
@@ -331,6 +333,7 @@ struct CliOptions {
   out << "Usage: " << prog << " [options]\n"
          "  --config <path>    JSON config file (default: config/default_tgc.json)\n"
          "  --out    <dir>     Output directory (default: results)\n"
+         "  --run-name <name>  Subdirectory name under --out (default: auto)\n"
          "  --distance <mm>    Run only this source distance (overrides config list)\n"
          "  --help             Show this message\n";
   std::exit(code);
@@ -346,6 +349,9 @@ CliOptions ParseCli(int argc, char* argv[]) {
     } else if (arg == "--out") {
       if (i + 1 >= argc) PrintUsageAndExit(argv[0], 1);
       opts.outDir = argv[++i];
+    } else if (arg == "--run-name") {
+      if (i + 1 >= argc) PrintUsageAndExit(argv[0], 1);
+      opts.runName = argv[++i];
     } else if (arg == "--distance") {
       if (i + 1 >= argc) PrintUsageAndExit(argv[0], 1);
       opts.singleDistanceMm = std::stod(argv[++i]);
@@ -1160,8 +1166,11 @@ json ConfigToJson(const Config& cfg) {
 }
 
 std::string BuildRunFolderName(const Config& cfg) {
+  std::time_t now = std::time(nullptr);
+  std::tm tm_local = *std::localtime(&now);
   std::ostringstream ss;
-  ss << "V" << static_cast<int>(cfg.geometry.wireVoltageV)
+  ss << std::put_time(&tm_local, "%y%m%d_%H-%M__")
+     << "V" << static_cast<int>(cfg.geometry.wireVoltageV)
      << "V__n" << cfg.simulation.nEvents;
   return ss.str();
 }
@@ -1188,7 +1197,8 @@ int main(int argc, char* argv[]) {
     if (opts.singleDistanceMm)
       cfg.source.fixedDistMm = std::vector<double>{*opts.singleDistanceMm};
 
-    const fs::path runDir = opts.outDir / BuildRunFolderName(cfg);
+    const fs::path runDir = opts.outDir /
+        (opts.runName.empty() ? BuildRunFolderName(cfg) : opts.runName);
     EnsureDirectory(runDir);
 
     std::cout << "TGC Garfield++ simulation\n"

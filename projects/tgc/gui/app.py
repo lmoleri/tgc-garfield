@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -95,10 +96,12 @@ class SimRunner(QThread):
     finished = pyqtSignal(str)   # emits the run output directory on success
     failed   = pyqtSignal(str)   # emits an error message on failure
 
-    def __init__(self, config_dict: dict, out_dir: str, parent=None):
+    def __init__(self, config_dict: dict, out_dir: str,
+                 run_name: str = "", parent=None):
         super().__init__(parent)
-        self._config   = config_dict
-        self._out_dir  = out_dir
+        self._config    = config_dict
+        self._out_dir   = out_dir
+        self._run_name  = run_name          # passed as --run-name to binary
         self._proc: subprocess.Popen | None = None
 
     # ── public ──────────────────────────────────────────────────────────
@@ -123,6 +126,8 @@ class SimRunner(QThread):
             return
 
         cmd = [str(BINARY), "--config", tmp_cfg, "--out", self._out_dir]
+        if self._run_name:
+            cmd += ["--run-name", self._run_name]
 
         env = os.environ.copy()
         env["GARFIELD_INSTALL"] = str(GARFIELD_INSTALL)
@@ -155,11 +160,17 @@ class SimRunner(QThread):
             self.failed.emit(f"Binary exited with code {ret}")
             return
 
-        # Locate the sub-directory the binary created: <out_dir>/V<V>V__n<n>/
+        # Locate the sub-directory the binary created.
+        # If we passed --run-name we already know the exact path; otherwise
+        # glob for any folder matching the naming pattern (supports both the
+        # new date-prefixed names and old-style V<V>V__n<N> directories).
         out_path = Path(self._out_dir)
-        subdirs  = sorted(out_path.glob("V*__n*"),
-                          key=lambda p: p.stat().st_mtime)
-        run_dir  = str(subdirs[-1]) if subdirs else self._out_dir
+        if self._run_name:
+            run_dir = str(out_path / self._run_name)
+        else:
+            subdirs = sorted(out_path.glob("*__n*"),
+                             key=lambda p: p.stat().st_mtime)
+            run_dir = str(subdirs[-1]) if subdirs else self._out_dir
         self.finished.emit(run_dir)
 
 
@@ -430,6 +441,15 @@ class ConfigPanel(QScrollArea):
         out_h.addWidget(btn_out)
 
         out_form.addRow("Directory", out_row)
+
+        self.run_name = QLineEdit()
+        self.run_name.setPlaceholderText("auto  (date + voltage + events)")
+        self.run_name.setToolTip(
+            "Optional label for the run subfolder.\n"
+            "Leave blank: yymmdd_hh-mm__VφV__nη  (auto)\n"
+            "Filled:      yymmdd_hh-mm__<your label>")
+        out_form.addRow("Run name", self.run_name)
+
         root_layout.addWidget(out_box)
 
         root_layout.addStretch()
@@ -2438,11 +2458,21 @@ class MainWindow(QMainWindow):
             out_path = (TGC_DIR / out_str).resolve()
         out_path.mkdir(parents=True, exist_ok=True)
 
+        # Build the run subfolder name: yymmdd_hh-mm__ + user tag or auto params
+        date_pfx = datetime.now().strftime("%y%m%d_%H-%M")
+        tag      = self.config_panel.run_name.text().strip()
+        if tag:
+            subdir = f"{date_pfx}__{tag}"
+        else:
+            v = int(cfg["geometry"]["wire_voltage_V"])
+            n = cfg["simulation"]["n_events"]
+            subdir = f"{date_pfx}__V{v}V__n{n}"
+
         self.results_panel.clear_log()
         self.results_panel.setCurrentIndex(0)   # show Log tab while running
         self.statusBar().showMessage("Running…")
 
-        self._runner = SimRunner(cfg, str(out_path))
+        self._runner = SimRunner(cfg, str(out_path), run_name=subdir)
         self._runner.log_line.connect(self.results_panel.append_log)
         self._runner.finished.connect(self._on_run_finished)
         self._runner.failed.connect(self._on_run_failed)
