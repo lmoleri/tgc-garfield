@@ -542,6 +542,22 @@ The resolved configuration used for the run, serialised to JSON for reproducibil
 
 Three-panel figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, and charge ratio vs source distance.
 
+### GUI plots snapshot (`tgc_plots.root`)
+
+Written by the GUI at the end of each run (requires PyROOT).  Contains the
+currently-rendered ROOT TCanvas objects, one per tab, keyed as follows:
+
+| Key | Source tab | Contents |
+|-----|------------|----------|
+| `waveforms` | Waveforms  | Mean anode/cathode signal waveforms |
+| `charge`    | Charges    | Cumulative charge integrals Q(t) |
+| `tracks_3d` | 3D Tracks  | 3D drift-line and geometry view |
+| `magboltz`  | Magboltz   | Gas transport-coefficient panels |
+| `efield`    | E-Field    | 2D electric-field maps |
+
+Only keys for canvases that were open and alive at run completion are written.
+The file is omitted (and a warning logged) if PyROOT is unavailable.
+
 ---
 
 ## Interpreting results

@@ -1398,30 +1398,34 @@ class ResultsPanel(QTabWidget):
 
     def _save_plots_root(self, run_dir) -> None:
         """Write all currently-rendered ROOT canvases to tgc_plots.root in run_dir."""
-        out = Path(run_dir) / "tgc_plots.root"
-        tf = ROOT.TFile.Open(str(out), "RECREATE")
-        if not tf or tf.IsZombie():
-            self.append_log("[GUI] Warning: could not create tgc_plots.root")
-            return
-        saved = []
-        for canvas, key in [
-            (self._root_canvas,        "waveforms"),
-            (self._charge_canvas,      "charge"),
-            (self._tracks_canvas,      "tracks_3d"),
-            (self._gas_canvas,         "magboltz"),
-            (self._efield_root_canvas, "efield"),
-        ]:
-            if canvas is None:
-                continue
-            if not self._root_canvas_alive(canvas, canvas.GetName()):
-                continue
-            tf.cd()
-            canvas.Write(key)
-            saved.append(key)
-        tf.Close()
-        if saved:
-            self.append_log(
-                f"[GUI] Plots saved → {out.name}  ({', '.join(saved)})")
+        try:
+            import ROOT  # noqa: PLC0415
+            out = Path(run_dir) / "tgc_plots.root"
+            tf = ROOT.TFile.Open(str(out), "RECREATE")
+            if not tf or tf.IsZombie():
+                self.append_log("[GUI] Warning: could not create tgc_plots.root")
+                return
+            saved = []
+            for canvas, key in [
+                (self._root_canvas,        "waveforms"),
+                (self._charge_canvas,      "charge"),
+                (self._tracks_canvas,      "tracks_3d"),
+                (self._gas_canvas,         "magboltz"),
+                (self._efield_root_canvas, "efield"),
+            ]:
+                if canvas is None:
+                    continue
+                if not self._root_canvas_alive(canvas, canvas.GetName()):
+                    continue
+                tf.cd()
+                canvas.Write(key)
+                saved.append(key)
+            tf.Close()
+            if saved:
+                self.append_log(
+                    f"[GUI] Plots saved → {out.name}  ({', '.join(saved)})")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] Could not save plots ROOT file: {exc}")
 
     # ── Waveforms ─────────────────────────────────────────────────────────
 
