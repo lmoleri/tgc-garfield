@@ -163,8 +163,10 @@ electrode were at 1 V and all others at 0 V, with all space charges removed).
 
 Two readout channels are defined:
 
-* **`anode`** — all 10 wires share this label; their weighting fields are summed
-  automatically by `Sensor`.
+* **`anode`** — the sense wires (all wires by default; configurable via
+  `geometry.sense_wires`) share this label; their weighting fields are summed
+  automatically by `Sensor`.  Non-sense wires are labelled `"field"` — they
+  shape the electrostatic field but are not added as readout electrodes.
 * **`cathode`** — the bottom cathode plane at y = −1.4 mm.
 
 #### Conductive mode (default)
@@ -330,6 +332,8 @@ been built yet, the window opens with a warning in the title bar.
 │    Gap [cm]          0.14       │  ← live output / results shown here                   │
 │    N wires           10         │                                                       │
 │    Wire voltage [V]  1900       │                                                       │
+│    Sense wires  [✓ All wires]   │                                                       │
+│               [e.g. 4,5]        │                                                       │
 │  ▼ Readout                      │                                                       │
 │    Type        [Conductive ▼]   │                                                       │
 │    (Insulator  [Kapton ▼])      │                                                       │
@@ -359,6 +363,7 @@ been built yet, the window opens with a warning in the title bar.
 │    Store drift lines [✓]        │                                                       │
 │  ▼ Output                       │                                                       │
 │    Directory  [results/] […]    │                                                       │
+│    Run name   [auto (date+V+n)] │                                                       │
 └─────────────────────────────────┴───────────────────────────────────────────────────────┘
 ```
 
@@ -396,6 +401,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `gap_cm`           | float | cm   | 0.14    | Distance from the wire plane to **each** cathode (the geometry is symmetric: both gaps equal this value). Increasing the gap reduces the average drift field, lowering gain |
 | `n_wires`          | int   | —    | 10      | Number of anode wires in the simulation cell. More wires increase the sensitive area but do not change single-wire physics |
 | `wire_voltage_V`   | float | V    | 1900.0  | High voltage applied to all anode wires (cathodes grounded). Primary handle for tuning gas gain; a ~100 V change shifts gain by roughly one order of magnitude |
+| `sense_wires`      | int array or null | — | `null` | 0-based indices (0 = leftmost wire) of the wires summed into the anode readout channel. `null` or absent → all wires read out (backward-compatible default). Non-listed wires remain at full HV and contribute to the electric field but are excluded from the Ramo weighting calculation. Validated: non-empty, every index in `[0, n_wires)` |
 
 ### `readout`
 
@@ -443,7 +449,17 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 
 ## Output
 
-All output is written to `<out_dir>/V<voltage>V__n<n_events>/`.
+All output is written to a date-stamped subdirectory inside `<out_dir>`:
+
+| Mode | Folder name |
+|------|-------------|
+| Auto (no run name) | `yymmdd_hh-MM__V<voltage>V__n<n_events>/` |
+| Custom run name | `yymmdd_hh-MM__<label>/` |
+
+The date prefix (`yymmdd_hh-MM`) is generated at launch time.  From the GUI, set
+"Run name" in the Output group to use a custom label; leave it blank for the auto
+format.  When invoking the binary directly, pass `--run-name <label>` to override;
+omitting it generates the auto format via `BuildRunFolderName` in `tgc_sim.cc`.
 
 ### Gas properties sidecar (`<gasfile>_props.csv`)
 
@@ -471,7 +487,7 @@ decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).
 
 | Object                  | Type     | Description                                     |
 |-------------------------|----------|-------------------------------------------------|
-| `h_anode_charge`        | TH1D     | Induced charge on all wires integrated over the time window [fC] |
+| `h_anode_charge`        | TH1D     | Induced charge on the sense wires integrated over the time window [fC] |
 | `h_cathode_charge`      | TH1D     | Induced charge on bottom (readout) cathode integrated over the time window [fC] |
 | `h_cathode_top_charge`  | TH1D     | Induced charge on top (non-readout) cathode integrated over the time window [fC] |
 | `h_ratio_charge`        | TH1D     | Q_cathode / Q_anode per event                   |
@@ -519,7 +535,7 @@ One row per (source distance, x-position) combination.  Columns:
 | `n_events` | — | Number of avalanche simulations run at this (distance, x-position) combination |
 | `n_interacted` | — | Events that produced at least one primary electron. Currently always equals `n_events` — every event interacts by construction |
 | `interaction_fraction` | — | `n_interacted / n_events`. Always 1.0 |
-| `mean_anode_charge_fC` | fC | Mean induced charge on all anode wires, integrated over the time window. With the default 40 μs window the full ion tail is captured; with a shorter window (e.g. 300 ns) only ~34 % of the ion contribution is included |
+| `mean_anode_charge_fC` | fC | Mean induced charge on the sense wires, integrated over the time window. With the default 40 μs window the full ion tail is captured; with a shorter window (e.g. 300 ns) only ~34 % of the ion contribution is included |
 | `rms_anode_charge_fC` | fC | RMS (σ) of the per-event anode charge distribution. Reflects Polya/exponential avalanche fluctuations |
 | `sem_anode_charge_fC` | fC | Standard error of the mean (σ/√N): statistical uncertainty on `mean_anode_charge_fC` |
 | `mean_cathode_charge_fC` | fC | Mean induced charge on the **readout (bottom) cathode** plane at y = −gap. Dominated by the slow CO2⁺ ion drift component; expected to be ~50 % of `mean_anode_charge_fC` by Ramo-theorem charge conservation |

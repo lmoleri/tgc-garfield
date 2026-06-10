@@ -83,6 +83,7 @@ struct GeometryConfig {
   double gapCm          = 0.14;
   int    nWires         = 10;
   double wireVoltageV   = 1900.0;
+  std::optional<std::vector<int>> senseWires;  // nullopt → all wires read out
 };
 
 struct ReadoutConfig {
@@ -380,6 +381,13 @@ Config LoadConfig(const fs::path& path) {
     cfg.geometry.gapCm        = ReadDouble(*g, "geometry", "gap_cm",         cfg.geometry.gapCm);
     cfg.geometry.nWires       = ReadInt   (*g, "geometry", "n_wires",         cfg.geometry.nWires);
     cfg.geometry.wireVoltageV = ReadDouble(*g, "geometry", "wire_voltage_V",  cfg.geometry.wireVoltageV);
+    auto* sw = FindMember(*g, "sense_wires", {"geometry", "sense_wires"});
+    if (sw && sw->is_array()) {
+      cfg.geometry.senseWires = std::vector<int>{};
+      for (auto& v : *sw) cfg.geometry.senseWires->push_back(v.get<int>());
+    } else {
+      cfg.geometry.senseWires = std::nullopt;   // all wires read out
+    }
   }
 
   if (const auto* r = FindSection(root, "readout")) {
@@ -458,6 +466,13 @@ Config LoadConfig(const fs::path& path) {
   if (cfg.geometry.gapCm       <= 0.)  throw std::runtime_error("geometry.gap_cm must be positive");
   if (cfg.geometry.nWires      <= 0)   throw std::runtime_error("geometry.n_wires must be positive");
   if (cfg.geometry.wireVoltageV<= 0.)  throw std::runtime_error("geometry.wire_voltage_V must be positive");
+  if (cfg.geometry.senseWires.has_value()) {
+    if (cfg.geometry.senseWires->empty())
+      throw std::runtime_error("geometry.sense_wires must not be empty (use null for all)");
+    for (int idx : *cfg.geometry.senseWires)
+      if (idx < 0 || idx >= cfg.geometry.nWires)
+        throw std::runtime_error("geometry.sense_wires index out of range [0, n_wires)");
+  }
   if (cfg.source.fixedDistMm.has_value() && cfg.source.fixedDistMm->empty())
     throw std::runtime_error("source.source_distances_mm must not be empty when set");
   if (cfg.gas.frac1 <= 0. || cfg.gas.frac1 >= 100.)
@@ -602,10 +617,16 @@ void BuildGeometry(ComponentAnalyticField& cmp, MediumMagboltz& gas,
   cmp.AddPlaneY(+geom.gapCm, 0., "cathode_top");
 
   // Anode wires at y = 0, centred at x = 0, all at +wireVoltageV.
-  // All wires share the label "anode" so Sensor sums them as one channel.
+  // Sense wires carry the label "anode" (Sensor sums them into one readout
+  // channel); the rest are labelled "field" — they still sit at HV and shape
+  // the electric field but are never added as a readout electrode.
+  const auto& sw = geom.senseWires;
   for (int i = 0; i < geom.nWires; ++i) {
     const double xw = (i - (geom.nWires - 1) / 2.) * geom.wirePitchCm;
-    cmp.AddWire(xw, 0., wireDiamCm, geom.wireVoltageV, "anode");
+    const bool isSense = !sw.has_value() ||
+        std::find(sw->begin(), sw->end(), i) != sw->end();
+    cmp.AddWire(xw, 0., wireDiamCm, geom.wireVoltageV,
+                isSense ? "anode" : "field");
   }
 }
 
@@ -1130,7 +1151,9 @@ json ConfigToJson(const Config& cfg) {
       {"wire_diameter_um", cfg.geometry.wireDiamUm},
       {"gap_cm",           cfg.geometry.gapCm},
       {"n_wires",          cfg.geometry.nWires},
-      {"wire_voltage_V",   cfg.geometry.wireVoltageV}
+      {"wire_voltage_V",   cfg.geometry.wireVoltageV},
+      {"sense_wires",      cfg.geometry.senseWires.has_value()
+                               ? json(*cfg.geometry.senseWires) : json(nullptr)}
     }},
     {"readout", {
       {"type",                       cfg.readout.type},
@@ -1204,7 +1227,11 @@ int main(int argc, char* argv[]) {
     std::cout << "TGC Garfield++ simulation\n"
               << "  config  : " << opts.configPath << "\n"
               << "  output  : " << runDir << "\n"
-              << "  geometry: " << cfg.geometry.nWires << " wires, "
+              << "  geometry: " << cfg.geometry.nWires << " wires"
+              << " (" << (cfg.geometry.senseWires.has_value()
+                              ? std::to_string(cfg.geometry.senseWires->size())
+                              : std::to_string(cfg.geometry.nWires))
+              << " read out), "
               << cfg.geometry.wirePitchCm * 10. << " mm pitch, "
               << cfg.geometry.wireDiamUm << " μm diameter, "
               << cfg.geometry.gapCm * 10. << " mm gap"

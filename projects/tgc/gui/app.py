@@ -73,11 +73,12 @@ def derive_gas_filename(gas: dict) -> str:
     T   = round(gas.get("temperature_K", 293.15))
     P   = round(gas.get("pressure_Torr", 760.0))
     Ee  = round(gas.get("max_electron_energy_eV", 2000.0))
-    Ef  = round(gas.get("e_field_max_vcm", 300000.0) / 1000)
+    Ef    = round(gas.get("e_field_max_vcm", 300000.0) / 1000)
+    EfMin = round(gas.get("e_field_min_vcm", 100.0))
     n   = gas.get("n_field_points", 20)
     c   = gas.get("n_magboltz_collisions", 10)
     pen = "pen" if gas.get("enable_penning", True) else "nopen"
-    return f"{g1}{f1}_{g2}_{f2}_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen}.gas"
+    return f"{g1}{f1}_{g2}_{f2}_T{T}_P{P}_Ee{Ee}_Ef{EfMin}v-{Ef}k_n{n}_c{c}_{pen}.gas"
 
 
 def derive_gas_props_filename(gas: dict) -> str:
@@ -200,11 +201,24 @@ class ConfigPanel(QScrollArea):
         self.n_wires    = self._spin(2, 100, 10)
         self.wire_volts = self._dspin(100.0, 5000.0, 50.0, 1, 1900.0)
 
+        self.all_sense_wires = QCheckBox("All wires read out")
+        self.all_sense_wires.setChecked(True)
+        self.sense_wires = QLineEdit("")
+        self.sense_wires.setEnabled(False)
+        self.sense_wires.setPlaceholderText("e.g. 4,5  (0-based; 0 = leftmost)")
+        self.sense_wires.setToolTip(
+            "Comma-separated 0-based indices of the wires summed into the anode "
+            "readout. Other wires stay at HV and shape the field but are not read out.")
+        self.all_sense_wires.toggled.connect(
+            lambda on: self.sense_wires.setEnabled(not on))
+
         geo_form.addRow("Wire pitch [cm]",    self.wire_pitch)
         geo_form.addRow("Wire diameter [μm]", self.wire_diam)
         geo_form.addRow("Gap [cm]",           self.gap_cm)
         geo_form.addRow("N wires",            self.n_wires)
         geo_form.addRow("Wire voltage [V]",   self.wire_volts)
+        geo_form.addRow("Sense wires",        self.all_sense_wires)
+        geo_form.addRow("",                   self.sense_wires)
         root_layout.addWidget(geo_box)
 
         # ── Readout ───────────────────────────────────────────────────────
@@ -342,6 +356,11 @@ class ConfigPanel(QScrollArea):
             "Number of log-spaced E-field points for the Magboltz transport table.\n"
             "More points → smoother interpolation; fewer → faster gas generation."
         )
+        self.e_field_min = self._dspin(10.0, 100_000.0, 100.0, 0, 100.0)
+        self.e_field_min.setToolTip(
+            "Minimum E-field in the Magboltz table [V/cm].\n"
+            "100 V/cm is suitable for most TGC operating conditions."
+        )
         self.e_field_max = self._dspin(10_000.0, 1_000_000.0, 10_000.0, 0, 300_000.0)
         self.e_field_max.setToolTip(
             "Maximum E-field in the Magboltz table [V/cm].\n"
@@ -359,6 +378,7 @@ class ConfigPanel(QScrollArea):
         gas_form.addRow("W-value [eV]",        self.w_value)
         gas_form.addRow("Max e⁻ energy [eV]",  self.max_electron_energy)
         gas_form.addRow("Field points",        self.n_field_pts)
+        gas_form.addRow("E-field min [V/cm]", self.e_field_min)
         ef_row = QWidget()
         ef_h   = QHBoxLayout(ef_row)
         ef_h.setContentsMargins(0, 0, 0, 0)
@@ -563,6 +583,21 @@ class ConfigPanel(QScrollArea):
             except ValueError:
                 x_positions = [0.0]
 
+        if self.all_sense_wires.isChecked():
+            sense_wires = None
+        else:
+            nmax = self.n_wires.value()
+            try:
+                sense_wires = sorted({
+                    int(v.strip())
+                    for v in self.sense_wires.text().split(",")
+                    if v.strip() and 0 <= int(v.strip()) < nmax
+                })
+            except ValueError:
+                sense_wires = None
+            if not sense_wires:
+                sense_wires = None
+
         ro_type = self.readout_type.currentText().lower()
         ins_mat = self.insulator_material.currentText().lower()
 
@@ -573,6 +608,7 @@ class ConfigPanel(QScrollArea):
                 "gap_cm":           self.gap_cm.value(),
                 "n_wires":          self.n_wires.value(),
                 "wire_voltage_V":   self.wire_volts.value(),
+                "sense_wires":      sense_wires,
             },
             "readout": {
                 "type":                       ro_type,
@@ -618,6 +654,13 @@ class ConfigPanel(QScrollArea):
         self.gap_cm.setValue(    g.get("gap_cm", 0.14))
         self.n_wires.setValue(   g.get("n_wires", 10))
         self.wire_volts.setValue(g.get("wire_voltage_V", 1900.0))
+        sw = g.get("sense_wires", None)
+        if sw:
+            self.all_sense_wires.setChecked(False)
+            self.sense_wires.setText(",".join(str(int(i)) for i in sw))
+        else:
+            self.all_sense_wires.setChecked(True)
+            self.sense_wires.clear()
 
         ro = d.get("readout", {})
         ro_type = ro.get("type", "conductive")
