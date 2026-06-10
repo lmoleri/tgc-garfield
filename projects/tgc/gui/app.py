@@ -408,6 +408,7 @@ class ConfigPanel(QScrollArea):
         self.ncoll.valueChanged.connect(self._update_gas_file_label)
         self.max_electron_energy.valueChanged.connect(self._update_gas_file_label)
         self.n_field_pts.valueChanged.connect(self._update_gas_file_label)
+        self.e_field_min.valueChanged.connect(self._update_gas_file_label)
         self.e_field_max.valueChanged.connect(self._update_gas_file_label)
         # Geometry changes affect E_peak shown in the label
         self.wire_pitch.valueChanged.connect(self._update_gas_file_label)
@@ -513,6 +514,7 @@ class ConfigPanel(QScrollArea):
             "n_magboltz_collisions":  self.ncoll.value(),
             "max_electron_energy_eV": self.max_electron_energy.value(),
             "n_field_points":         self.n_field_pts.value(),
+            "e_field_min_vcm":        self.e_field_min.value(),
             "e_field_max_vcm":        self.e_field_max.value(),
         }
         name = derive_gas_filename(gas)
