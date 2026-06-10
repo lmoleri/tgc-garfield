@@ -36,6 +36,7 @@
     "w_value_eV": 26.0,
     "max_electron_energy_eV": 2000.0,
     "n_field_points": 50,
+    "e_field_min_vcm": 100.0,
     "e_field_max_vcm": 400000.0
   },
   "simulation": {

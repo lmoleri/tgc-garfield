@@ -112,6 +112,7 @@ struct GasConfig {
   int    nCollisions         = 10;
   double maxElectronEnergyEV = 2000.0;
   int    nFieldPoints        = 20;         // number of E-field grid points for Magboltz
+  double eFieldMinVcm        = 100.0;    // lower E-field limit [V/cm] for the gas table
   double eFieldMaxVcm        = 300000.0;  // upper E-field limit [V/cm] for the gas table
   double wValueEV            = 26.0;      // effective ionisation energy [eV per ion pair]
 };
@@ -183,14 +184,15 @@ std::string DeriveGasFileName(const GasConfig& g) {
   auto I = [](double v) {
     return std::to_string(static_cast<long long>(std::llround(v)));
   };
-  const int    efKv  = static_cast<int>(std::llround(g.eFieldMaxVcm / 1000.0));
+  const int    efKv    = static_cast<int>(std::llround(g.eFieldMaxVcm / 1000.0));
+  const int    efMinV  = static_cast<int>(std::llround(g.eFieldMinVcm));
   const double frac2 = 100.0 - g.frac1;
   const std::string prefix = g.gas1 + I(g.frac1) + "_" + g.gas2 + "_" + I(frac2);
   return prefix
        + "_T"  + I(g.temperatureK)
        + "_P"  + I(g.pressureTorr)
        + "_Ee" + I(g.maxElectronEnergyEV)
-       + "_Ef" + std::to_string(efKv) + "k"
+       + "_Ef" + std::to_string(efMinV) + "v-" + std::to_string(efKv) + "k"
        + "_n"  + std::to_string(g.nFieldPoints)
        + "_c"  + std::to_string(g.nCollisions)
        + (g.enablePenning ? "_pen" : "_nopen")
@@ -437,6 +439,7 @@ Config LoadConfig(const fs::path& path) {
     cfg.gas.nCollisions         = ReadInt   (*g, "gas", "n_magboltz_collisions",  cfg.gas.nCollisions);
     cfg.gas.maxElectronEnergyEV = ReadDouble(*g, "gas", "max_electron_energy_eV", cfg.gas.maxElectronEnergyEV);
     cfg.gas.nFieldPoints        = ReadInt   (*g, "gas", "n_field_points",         cfg.gas.nFieldPoints);
+    cfg.gas.eFieldMinVcm        = ReadDouble(*g, "gas", "e_field_min_vcm",        cfg.gas.eFieldMinVcm);
     cfg.gas.eFieldMaxVcm        = ReadDouble(*g, "gas", "e_field_max_vcm",        cfg.gas.eFieldMaxVcm);
     cfg.gas.wValueEV            = ReadDouble(*g, "gas", "w_value_eV",             cfg.gas.wValueEV);
   }
@@ -553,7 +556,8 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   } else {
     std::cout << "  Gas file not found: " << gasFile << "\n"
               << "  Running Magboltz for " << cfg.nFieldPoints
-              << " field points up to " << static_cast<int>(cfg.eFieldMaxVcm) << " V/cm"
+              << " field points from " << static_cast<int>(cfg.eFieldMinVcm)
+              << " to " << static_cast<int>(cfg.eFieldMaxVcm) << " V/cm"
               << " (first run: ~5 min for smoke grid, ~1-2 h for full grid)...\n";
     // Set energy ceiling before generation — electrons near the wire (>100 kV/cm
     // at 1900 V) reach energies well above Magboltz's default ~40 eV ceiling.
@@ -561,7 +565,7 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
     // Logarithmically-spaced field grid from gentle drift region to near-wire avalanche.
     // At E>100 kV/cm the Magboltz SST/TOF tracks millions of avalanche electrons and
     // can take hours; reduce e_field_max_vcm / n_field_points for faster smoke runs.
-    gas.SetFieldGrid(100., cfg.eFieldMaxVcm, cfg.nFieldPoints, /*logspacing=*/true);
+    gas.SetFieldGrid(cfg.eFieldMinVcm, cfg.eFieldMaxVcm, cfg.nFieldPoints, /*logspacing=*/true);
     gas.GenerateGasTable(cfg.nCollisions, /*verbose=*/false);
     gas.WriteGasFile(gasFile);
     std::cout << "  Gas table saved to: " << gasFile << "\n";
@@ -1174,6 +1178,7 @@ json ConfigToJson(const Config& cfg) {
       {"n_magboltz_collisions",  cfg.gas.nCollisions},
       {"max_electron_energy_eV", cfg.gas.maxElectronEnergyEV},
       {"n_field_points",         cfg.gas.nFieldPoints},
+      {"e_field_min_vcm",        cfg.gas.eFieldMinVcm},
       {"e_field_max_vcm",        cfg.gas.eFieldMaxVcm},
       {"w_value_eV",             cfg.gas.wValueEV}
     }},

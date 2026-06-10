@@ -634,6 +634,7 @@ class ConfigPanel(QScrollArea):
                 "w_value_eV":             self.w_value.value(),
                 "max_electron_energy_eV": self.max_electron_energy.value(),
                 "n_field_points":         self.n_field_pts.value(),
+                "e_field_min_vcm":        self.e_field_min.value(),
                 "e_field_max_vcm":        self.e_field_max.value(),
             },
             "simulation": {
@@ -703,6 +704,7 @@ class ConfigPanel(QScrollArea):
         self.w_value.setValue(    gas.get("w_value_eV", 26.0))
         self.max_electron_energy.setValue(gas.get("max_electron_energy_eV", 2000.0))
         self.n_field_pts.setValue(        gas.get("n_field_points", 20))
+        self.e_field_min.setValue(        gas.get("e_field_min_vcm", 100.0))
         self.e_field_max.setValue(        gas.get("e_field_max_vcm", 300_000.0))
 
         sim = d.get("simulation", {})
