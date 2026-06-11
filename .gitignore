@@ -11,6 +11,9 @@ projects/*/results/
 projects/*/*.gas
 *.gas
 
+# Generated Magboltz property sidecars
+*_props.csv
+
 # Generated ROOT files (large binary outputs)
 projects/*/*.root
 *.root

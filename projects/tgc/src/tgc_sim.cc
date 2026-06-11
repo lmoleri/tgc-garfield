@@ -18,7 +18,9 @@
 //              the deposited charge remains at its landing point, but the local
 //              surface potential decays to 0 V (grounded edges) with time
 //              constant τ = ε₀ε_r ρ_s L²/(π²d). The Ramo weighting potential is
-//              corrected for the dielectric layer (α = ε_r·gap/(d+ε_r·gap));
+//              the wire-screened analytic cathode weighting potential of the
+//              ComponentAnalyticField, scaled by the dielectric transparency
+//              factor α = ε_r·gap/(d+ε_r·gap) and relaxing as exp(−t/τ);
 //              the delayed signal (both during drift and after collection) is
 //              computed via ComponentUser::SetDelayedWeightingPotential.
 //
@@ -126,6 +128,11 @@ struct SimulationConfig {
   double      timeStepNs       = 0.5;
   bool        enableIonDrift   = true;
   bool        storeDriftLines  = false; // store intermediate e⁻ drift steps for 3D viz
+  double      ionMaxStepUm     = 5.0;   // cap on DriftLineRKF step [µm]; 0 = no cap.
+                                        // Without a cap the stepper's geometrically
+                                        // growing steps under-sample the near-wire ion
+                                        // current (flat-shelf artifact in the first
+                                        // ~8 ns after the electron spike).
 };
 
 // ─── 3D-visualisation display limits ─────────────────────────────────────────
@@ -455,6 +462,7 @@ Config LoadConfig(const fs::path& path) {
     cfg.simulation.timeStepNs       = ReadDouble(*s, "simulation", "time_step_ns",       cfg.simulation.timeStepNs);
     cfg.simulation.enableIonDrift   = ReadBool  (*s, "simulation", "enable_ion_drift",   cfg.simulation.enableIonDrift);
     cfg.simulation.storeDriftLines  = ReadBool  (*s, "simulation", "store_drift_lines",  cfg.simulation.storeDriftLines);
+    cfg.simulation.ionMaxStepUm     = ReadDouble(*s, "simulation", "ion_max_step_um",    cfg.simulation.ionMaxStepUm);
   }
 
   if (cfg.readout.type != "conductive" && cfg.readout.type != "resistive")
@@ -640,7 +648,7 @@ void BuildGeometry(ComponentAnalyticField& cmp, MediumMagboltz& gas,
   }
 }
 
-void SetupResistiveReadout(ComponentUser& cmp,
+void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
                            const ReadoutConfig& ro, const GeometryConfig& geom,
                            const SimulationConfig& sim) {
   const double epsR   = (ro.insulatorMaterial == "fr4") ? 4.6 : 3.5;
@@ -656,39 +664,41 @@ void SetupResistiveReadout(ComponentUser& cmp,
   const double tauNs  = eps0SI * epsR * ro.surfaceResistivityOhmSq
                         * (L_m * L_m) / (M_PI * M_PI * dInsM) * 1e9;
 
-  const double gap = geom.gapCm;
-
-  // Static weighting potential: W_s(y) = α (y + gap) / gap
+  // Spatial shape: the wire-screened analytic weighting potential of the
+  // cathode plane (grounded wires suppress it near the wire and in the top
+  // half-gap), scaled by the dielectric transparency factor α.  The previous
+  // linear parallel-plate form ignored wire screening and overstated the
+  // prompt electron spike and the top-going-ion contribution on the pad.
   cmp.SetWeightingPotential(
-      [alpha, gap](const double, const double y, const double) {
-        return alpha * (y + gap) / gap;
+      [&fieldCmp, alpha](const double x, const double y, const double z) {
+        return alpha * fieldCmp.WeightingPotential(x, y, z, "cathode");
       }, "cathode");
 
-  // Static weighting field: E_w = −α/gap ŷ (uniform in y)
   cmp.SetWeightingField(
-      [alpha, gap](const double, const double, const double,
-                   double& wx, double& wy, double& wz) {
-        wx = wz = 0.;
-        wy = -alpha / gap;
+      [&fieldCmp, alpha](const double x, const double y, const double z,
+                         double& wx, double& wy, double& wz) {
+        fieldCmp.WeightingField(x, y, z, wx, wy, wz, "cathode");
+        wx *= alpha; wy *= alpha; wz *= alpha;
       }, "cathode");
 
   if (ro.enableDelayedSignal) {
-    // Delayed weighting potential: W_d(y,t) = W_s(y) × (exp(−t/τ) − 1)
+    // Delayed weighting potential: W_d(x,y,z,t) = W_s(x,y,z) × (exp(−t/τ) − 1)
     // Total W = W_s + W_d = W_s × exp(−t/τ) → decays to 0 as surface potential
     // at landing point is pulled to ground by the resistive sheet.
     cmp.SetDelayedWeightingPotential(
-        [alpha, gap, tauNs](const double, const double y, const double,
-                            const double t) {
-          return alpha * (y + gap) / gap * (std::exp(-t / tauNs) - 1.0);
+        [&fieldCmp, alpha, tauNs](const double x, const double y, const double z,
+                                  const double t) {
+          return alpha * fieldCmp.WeightingPotential(x, y, z, "cathode")
+                 * (std::exp(-t / tauNs) - 1.0);
         }, "cathode");
 
-    // Delayed weighting field: E_wd = −dW_d/dy = (α/gap)(1 − exp(−t/τ)) ŷ
     cmp.SetDelayedWeightingField(
-        [alpha, gap, tauNs](const double, const double, const double,
-                            const double t,
-                            double& wx, double& wy, double& wz) {
-          wx = wz = 0.;
-          wy = -alpha / gap * (std::exp(-t / tauNs) - 1.0);
+        [&fieldCmp, alpha, tauNs](const double x, const double y, const double z,
+                                  const double t,
+                                  double& wx, double& wy, double& wz) {
+          fieldCmp.WeightingField(x, y, z, wx, wy, wz, "cathode");
+          const double f = alpha * (std::exp(-t / tauNs) - 1.0);
+          wx *= f; wy *= f; wz *= f;
         }, "cathode");
 
     // Sample delayed signal over max(5τ, full time window), 200 points
@@ -703,6 +713,7 @@ void SetupResistiveReadout(ComponentUser& cmp,
   std::cout << "  Resistive readout: α = " << alpha
             << ", τ = " << tauNs << " ns"
             << " (" << ro.resistiveLayerSizeCm << " cm layer, 2-edge ground)"
+            << ", wire-screened analytic weighting potential"
             << (ro.enableDelayedSignal ? "" : " (delayed signal disabled)")
             << "\n";
 }
@@ -777,10 +788,25 @@ DistanceSummary RunDistancePoint(const Config& cfg,
                              "Mean cathode_top signal;t [ns];#LTi_{cathode\_top}#GT [fC/ns]",
                              static_cast<int>(nBins), 0., sim.timeWindowNs);
 
+  // Electron / ion components (prompt + delayed of each species)
+  TProfile pAnodeElec("p_anode_electron",
+                      "Mean anode e^{-} signal;t [ns];#LTi_{anode,e}#GT [fC/ns]",
+                      static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pAnodeIon("p_anode_ion",
+                     "Mean anode ion signal;t [ns];#LTi_{anode,ion}#GT [fC/ns]",
+                     static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pCathodeElec("p_cathode_electron",
+                        "Mean cathode e^{-} signal;t [ns];#LTi_{cathode,e}#GT [fC/ns]",
+                        static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pCathodeIon("p_cathode_ion",
+                       "Mean cathode ion signal;t [ns];#LTi_{cathode,ion}#GT [fC/ns]",
+                       static_cast<int>(nBins), 0., sim.timeWindowNs);
+
   for (TH1* h : std::initializer_list<TH1*>{
            &hAnodeQ, &hCathodeQ, &hCathodeTopQ, &hRatio,
            &hNprimary, &hAvalSize,
-           &pAnodeSignal, &pCathodeSignal, &pCathodeTopSignal}) {
+           &pAnodeSignal, &pCathodeSignal, &pCathodeTopSignal,
+           &pAnodeElec, &pAnodeIon, &pCathodeElec, &pCathodeIon}) {
     h->SetDirectory(nullptr);
   }
 
@@ -788,6 +814,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   TTree signalTree("t_signals", "Per-event signal waveforms");
   signalTree.SetDirectory(nullptr);
   std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
+  std::vector<float> anodeSigE(nBins, 0.f), anodeSigI(nBins, 0.f);
+  std::vector<float> cathodeSigE(nBins, 0.f), cathodeSigI(nBins, 0.f);
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
   signalTree.Branch("event",             &evtId, "event/I");
@@ -795,6 +823,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   signalTree.Branch("cathode_charge_fC", &evtQc, "cathode_charge_fC/F");
   signalTree.Branch("anode",   &anodeSig);
   signalTree.Branch("cathode", &cathodeSig);
+  signalTree.Branch("anode_e",   &anodeSigE);
+  signalTree.Branch("anode_i",   &anodeSigI);
+  signalTree.Branch("cathode_e", &cathodeSigE);
+  signalTree.Branch("cathode_i", &cathodeSigI);
 
   // ── 3D track branches ────────────────────────────────────────────────────────
   // primary_x/y/z : points along the primary electron drift line (≥ 2 always;
@@ -832,7 +864,17 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   // position and adds the Ramo-theorem induced current to the sensor.
   // Constructed only when ion transport is enabled to avoid needless overhead.
   std::optional<DriftLineRKF> ionDrift;
-  if (sim.enableIonDrift) ionDrift.emplace(&sensor);
+  if (sim.enableIonDrift) {
+    ionDrift.emplace(&sensor);
+    // Cap the RKF step so the induced-current samples resolve the near-wire
+    // ion signal; uncapped, the geometrically growing steps span ~5-8 ns right
+    // where i(t) varies fastest, leaving a flat-shelf artifact after the spike.
+    if (sim.ionMaxStepUm > 0.) {
+      ionDrift->SetMaximumStepSize(sim.ionMaxStepUm * 1.e-4);  // µm → cm
+      std::cout << "  Ion drift-line step capped at " << sim.ionMaxStepUm
+                << " um.\n";
+    }
+  }
 
   // ── Accumulators for summary statistics ──────────────────────────────────────
   std::vector<double> anodeCharges, cathodeCharges, cathodeTopCharges, chargeRatios;
@@ -972,6 +1014,15 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       const double sigA = sensor.GetSignal("anode",       k);
       const double sigC = sensor.GetSignal("cathode",     k);
       const double sigT = sensor.GetSignal("cathode_top", k);
+      // Species split: prompt + delayed of each; sums exactly to GetSignal.
+      const double sigAe = sensor.GetElectronSignal("anode", k)
+                         + sensor.GetDelayedElectronSignal("anode", k);
+      const double sigAi = sensor.GetIonSignal("anode", k)
+                         + sensor.GetDelayedIonSignal("anode", k);
+      const double sigCe = sensor.GetElectronSignal("cathode", k)
+                         + sensor.GetDelayedElectronSignal("cathode", k);
+      const double sigCi = sensor.GetIonSignal("cathode", k)
+                         + sensor.GetDelayedIonSignal("cathode", k);
       rawAnode      += sigA;
       rawCathode    += sigC;
       rawCathodeTop += sigT;
@@ -979,8 +1030,16 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       pAnodeSignal.Fill(t,      sigA * nPrimary);
       pCathodeSignal.Fill(t,    sigC * nPrimary);
       pCathodeTopSignal.Fill(t, sigT * nPrimary);
+      pAnodeElec.Fill(t,   sigAe * nPrimary);
+      pAnodeIon.Fill(t,    sigAi * nPrimary);
+      pCathodeElec.Fill(t, sigCe * nPrimary);
+      pCathodeIon.Fill(t,  sigCi * nPrimary);
       anodeSig[k]   = static_cast<float>(sigA * nPrimary);
       cathodeSig[k] = static_cast<float>(sigC * nPrimary);
+      anodeSigE[k]   = static_cast<float>(sigAe * nPrimary);
+      anodeSigI[k]   = static_cast<float>(sigAi * nPrimary);
+      cathodeSigE[k] = static_cast<float>(sigCe * nPrimary);
+      cathodeSigI[k] = static_cast<float>(sigCi * nPrimary);
     }
 
     const double qAnode      = -rawAnode      * sim.timeStepNs * nPrimary; // [fC]
@@ -1024,6 +1083,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     pAnodeSignal.Write("p_anode_signal");
     pCathodeSignal.Write("p_cathode_signal");
     pCathodeTopSignal.Write("p_cathode_top_signal");
+    pAnodeElec.Write("p_anode_electron");
+    pAnodeIon.Write("p_anode_ion");
+    pCathodeElec.Write("p_cathode_electron");
+    pCathodeIon.Write("p_cathode_ion");
     signalTree.Write("t_signals");
   }
 
@@ -1197,7 +1260,8 @@ json ConfigToJson(const Config& cfg) {
       {"time_window_ns",     cfg.simulation.timeWindowNs},
       {"time_step_ns",       cfg.simulation.timeStepNs},
       {"enable_ion_drift",   cfg.simulation.enableIonDrift},
-      {"store_drift_lines",  cfg.simulation.storeDriftLines}
+      {"store_drift_lines",  cfg.simulation.storeDriftLines},
+      {"ion_max_step_um",    cfg.simulation.ionMaxStepUm}
     }}
   };
 }
@@ -1299,14 +1363,17 @@ int main(int argc, char* argv[]) {
     SetupGas(gas, cfg.gas);
 
     // Geometry and sensor are shared across all distance points
+    ComponentAnalyticField cmp;
+    BuildGeometry(cmp, gas, cfg.geometry);
+
+    // Must be built after cmp: the resistive readout wraps cmp's analytic
+    // cathode weighting potential (captured by reference in its lambdas).
     ComponentUser cmpReadout;
     if (cfg.readout.type == "resistive") {
       std::cout << "\nSetting up resistive readout...\n";
-      SetupResistiveReadout(cmpReadout, cfg.readout, cfg.geometry, cfg.simulation);
+      SetupResistiveReadout(cmpReadout, cmp, cfg.readout, cfg.geometry,
+                            cfg.simulation);
     }
-
-    ComponentAnalyticField cmp;
-    BuildGeometry(cmp, gas, cfg.geometry);
 
     Sensor sensor;
     SetupSensor(sensor, cmp,

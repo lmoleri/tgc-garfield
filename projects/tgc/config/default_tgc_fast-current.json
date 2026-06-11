@@ -18,12 +18,10 @@
   "source": {
     "energy_keV": 5.6,
     "source_distances_mm": [
-      -0.7,
-      0.7
+      -0.7
     ],
     "x_positions_cm": [
-      0.0,
-      0.09
+      0.0
     ]
   },
   "gas": {
@@ -32,19 +30,19 @@
     "gas2": "co2",
     "ion_species": "co2",
     "temperature_K": 293.15,
-    "pressure_Torr": 750.0,
+    "pressure_Torr": 760.0,
     "enable_penning": true,
-    "n_magboltz_collisions": 10,
+    "n_magboltz_collisions": 2,
     "w_value_eV": 26.0,
     "max_electron_energy_eV": 2000.0,
-    "n_field_points": 50,
+    "n_field_points": 10,
     "e_field_min_vcm": 100.0,
     "e_field_max_vcm": 400000.0
   },
   "simulation": {
     "n_events": 1,
     "max_avalanche_size": 500000,
-    "time_window_ns": 40000.0,
+    "time_window_ns": 200.0,
     "time_step_ns": 0.1,
     "enable_ion_drift": true,
     "store_drift_lines": true,

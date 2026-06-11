@@ -15,11 +15,14 @@ projects/tgc/
 ├── src/
 │   └── tgc_sim.cc              ← simulation binary (C++20, ~1350 lines)
 ├── config/
-│   ├── default_tgc.json        ← production config
-│   ├── smoke_tgc_2.json        ← fast smoke test (ncoll=2, 10 events)
-│   └── smoke_tgc_5.json        ← medium smoke test (ncoll=5)
+│   ├── default_tgc.json            ← production config
+│   ├── default_tgc_fast-current.json ← fast preset (short window, narrow E-grid)
+│   ├── smoke_tgc_2.json            ← fast smoke test (ncoll=2, 10 events)
+│   └── smoke_tgc_5.json            ← medium smoke test (ncoll=5)
 ├── gui/
 │   └── app.py                  ← PyQt5 desktop GUI
+├── tools/
+│   └── plot_ion_tail.py        ← fits i₀/(1+t/t₀) to the anode ion tail
 ├── third_party/
 │   └── nlohmann/json.hpp       ← vendored single-header JSON library
 ├── CMakeLists.txt
@@ -90,7 +93,8 @@ across-wire span between the grounded edges).
 
 Electron drift velocity, diffusion, attachment, and Townsend coefficients are computed
 by the Magboltz Monte Carlo code (via `MediumMagboltz`) over a logarithmic electric-field
-grid from 100 V/cm to 300 kV/cm.  Results are cached to a `.gas` file and reloaded on
+grid from `e_field_min_vcm` to `e_field_max_vcm` (default 100 V/cm to 400 kV/cm).
+Results are cached to a `.gas` file and reloaded on
 subsequent runs.
 
 **Penning transfer** is enabled by default.  In Ar:CO2 the lowest Ar metastable levels
@@ -109,9 +113,10 @@ absolute gas-gain data for Ar:CO2 70:30) applied inside
 cathode to complete the Ramo-theorem induced-charge calculation.  In Ar:CO2 the dominant
 drifting species is CO2⁺ rather than Ar⁺: the lower ionisation potential of CO2
 (13.78 eV vs. Ar 15.76 eV) means Ar⁺ rapidly charge-transfers to CO2⁺ on nanosecond
-timescales.  The simulation loads the `IonMobility_CO2+_CO2.txt` table from the
-Garfield++ data directory.  Garfield++ stores one positive-ion mobility table per gas
-object; CO2⁺ is the best single-species approximation for this mixture.
+timescales.  The simulation loads the `IonMobility_{X}+_{X}.txt` table from the
+Garfield++ data directory, where `X` is `gas.ion_species` (default `co2`).
+Garfield++ stores one positive-ion mobility table per gas object; CO2⁺ is the best
+single-species approximation for the default Ar:CO2 mixture.
 
 ### 2. Primary ionisation — W-value model
 
@@ -149,8 +154,9 @@ After each avalanche, the simulation iterates over every electron track endpoint
 returned by `GetElectronEndpoints()`: the **start position** of track 0 is the primary
 photoionisation ion; the start positions of tracks 1…n are the positions of avalanche
 ions created in ionising collisions near the wire.  Each ion is transported by
-`DriftLineRKF::DriftIon()` using the CO2⁺ mobility loaded from the Garfield++ data
-directory, and its Ramo-theorem induced current is added to the sensor.
+`DriftLineRKF::DriftIon()` using the configured ion mobility (`gas.ion_species`,
+default CO2⁺) loaded from the Garfield++ data directory, and its Ramo-theorem induced
+current is added to the sensor.
 
 This is the dominant CPU cost for events with large avalanches (see Performance notes).
 
@@ -182,18 +188,25 @@ Standard Ramo induction: the cathode weighting potential is computed by
 Two corrections apply when `readout.type = "resistive"`:
 
 1. **Dielectric attenuation** — the conductive pad sits behind an insulating
-   substrate of permittivity ε_r and thickness d.  The 1-D Poisson solution
-   gives a reduced weighting potential in the gas:
+   substrate of permittivity ε_r and thickness d.  The spatial shape of the pad
+   weighting potential is the **wire-screened analytic cathode weighting
+   potential** of `ComponentAnalyticField` (same as conductive mode: 1 V on the
+   cathode plane, 0 V on wires and top, so the grounded wires suppress it near
+   the wire plane and in the top half-gap), scaled by the dielectric
+   transparency factor:
 
-   > W(y) = α (y + gap) / gap,   α = ε_r · gap / (d + ε_r · gap)
+   > W(x,y,z) = α · W_cathode(x,y,z),   α = ε_r · gap / (d + ε_r · gap)
 
    For Kapton (ε_r = 3.5) with d = 100 μm and gap = 1.4 mm, α ≈ 0.98.
+   (An earlier version used a 1-D linear W(y) that ignored wire screening; it
+   overstated the prompt electron spike and the top-going-ion contribution on
+   the pad.)
 
 2. **Delayed signal** — the deposited surface charge remains at its landing
    point but the grounded edges pull the local resistive-layer potential toward
    0 V with time constant τ = ε₀ ε_r ρ_s L²/(π² d).  This causes the
-   weighting potential to decay as W(y,t) = W(y) · exp(−t/τ), which contributes
-   a time-distributed signal on two timescales:
+   weighting potential to decay as W(x,y,z,t) = W(x,y,z) · exp(−t/τ), which
+   contributes a time-distributed signal on two timescales:
    - *During drift in the gas*: the time-varying weighting potential modifies
      how much each drifting charge induces on the pad at each moment.
    - *After collection*: the fixed surface charge couples to the pad through a
@@ -213,11 +226,11 @@ The gas file name is derived automatically from the gas configuration parameters
 there is no `gas_file` key in the config.  The naming scheme is:
 
 ```
-ar70_co2_30_T{T}_P{P}_Ee{Ee}_Ef{Ef}k_n{n}_c{c}_{pen|nopen}.gas
+{gas1}{f1}_{gas2}_{f2}_T{T}_P{P}_Ee{Ee}_Ef{Efmin}v-{Efmax}k_n{n}_c{c}_{pen|nopen}.gas
 ```
 
 For the default config this produces:
-`ar70_co2_30_T293_P750_Ee2000_Ef400k_n50_c10_pen.gas`
+`ar70_co2_30_T293_P750_Ee2000_Ef100v-400k_n50_c10_pen.gas`
 
 The file is written to (and looked up from) the working directory of the binary,
 which is `projects/tgc/` when run via the GUI or with the standard CMake invocation.
@@ -345,9 +358,10 @@ been built yet, the window opens with a warning in the title bar.
 │    (Delayed signal [✓])         │                                                       │
 │  ▼ Source                       │                                                       │
 │    Energy [keV]      5.9        │                                                       │
-│    Distances [mm]  -0.7,0.7     │                                                       │
-│    X position  [ Random]        │                                                       │
-│      fixed x [cm]  [0.0,0.9]   │  ← comma-separated; one run per value                 │
+│    Distance     [ Random]       │                                                       │
+│      fixed dist [mm] -0.7,0.7   │  ← comma-separated; one run per value                 │
+│    X position   [ Random]       │                                                       │
+│      fixed x [cm]  [0.0,0.09]  │  ← Random unchecks → uniform over wire span           │
 │  ▼ Gas                          │                                                       │
 │    Gas 1  [ar  ▼]  70.0 %      │                                                       │
 │    Gas 2  [co2 ▼]  30.0 %      │                                                       │
@@ -375,7 +389,7 @@ been built yet, the window opens with a warning in the title bar.
 | **Log** | Live stdout stream from `tgc_sim`, auto-scrolling |
 | **Summary** | Table from `summary.csv` — one row per source distance |
 | **Plots** | 2 × 3 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, ⟨Q_cathode_top⟩, charge ratio, and avalanche size vs source distance (with SEM error bars). Sixth cell empty |
-| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display. Read directly from the ROOT file via uproot |
+| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). Read directly from the ROOT file via uproot |
 | **Charge** | Cumulative charge integrals Q(t) — running integral of each waveform — for anode and cathode, per (distance, x-position) pair. An event slider selects individual events. ROOT TCanvas opens separately (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
@@ -421,19 +435,24 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | Key                   | Type          | Unit | Default              | Description                                               |
 |-----------------------|---------------|------|----------------------|-----------------------------------------------------------|
 | `energy_keV`          | float         | keV  | 5.9                  | Photon energy of the simulated X-ray source (Fe-55 K-alpha line). Determines the number of primary electrons via `N = round(E_photon[eV] / w_value_eV)` (≈227 for Fe-55 at 5.9 keV and W = 26 eV) |
-| `source_distances_mm` | float array   | mm   | [-0.7, 0.7] | List of signed y-positions (mm) at which primary electrons are placed, measured from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). Each distance is a separate simulation run. Values are clamped to (−`gap_cm`×10, +`gap_cm`×10) |
+| `source_distances_mm` | float array or null | mm | [-0.7, 0.7] | List of signed y-positions (mm) at which primary electrons are placed, measured from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). Each distance is a separate simulation run. Values are clamped to (−`gap_cm`×10, +`gap_cm`×10). `null` → a single run with the distance drawn uniformly over the gap each event (ROOT directory `dist_rnd/`) |
 | `x_positions_cm`      | float array or null | cm | [0.0, 0.9] | Fixed lateral (x) positions [cm] for the photon interaction point. `null` → uniform random over the wire array each event; the shipped default specifies two fixed x-positions (wire centre and midpoint). One or more values → one simulation run per distance × x-position pair; ROOT directory named `dist_Nmm_xMmm/`. Backward-compatible with the old scalar `x_position_cm` key (wrapped into a one-element list) |
 
 ### `gas`
 
 | Key                     | Type   | Unit  | Default                   | Description                                      |
 |-------------------------|--------|-------|---------------------------|--------------------------------------------------|
+| `gas1`                  | string | —     | `"ar"`                    | First gas species (Magboltz name, lowercase). Passed to the `MediumMagboltz(gas1, frac1, gas2, 100−frac1)` constructor and used as the `.gas` filename prefix |
+| `gas1_fraction_pct`     | float  | %     | 70.0                      | Volume fraction of `gas1`; `gas2` gets the remaining `100 − gas1_fraction_pct`. Validated to lie in (0, 100) |
+| `gas2`                  | string | —     | `"co2"`                   | Second (complementary) gas species |
+| `ion_species`           | string | —     | `"co2"`                   | Which single-component ion-mobility table to load: `IonMobility_{X}+_{X}.txt` from the Garfield++ data directory (X uppercased). Should match the dominant drifting ion of the mixture. Files ship for ar, co2, cf4, he, ne |
 | `temperature_K`         | float  | K     | 293.15                    | Gas temperature passed to Magboltz. Affects gas number density (n ∝ 1/T at fixed pressure), which shifts drift velocity and Townsend coefficients. Must match physical detector conditions; 293.15 K = 20 °C |
 | `pressure_Torr`         | float  | Torr  | 750.0                     | Gas pressure passed to Magboltz. Together with temperature, sets gas density. 750 Torr ≈ 0.987 atm. Reducing pressure increases mean free path and electron energy, raising gain |
 | `enable_penning`        | bool   | —     | true                      | Activates Penning transfer via `MediumMagboltz::EnablePenningTransfer()`. In Ar:CO2 70:30 this raises the effective Townsend coefficient by ~20–40 %, bringing simulated gain closer to measured values. Should be left on for this mixture |
 | `n_magboltz_collisions` | int    | —     | 10                        | Monte Carlo collision cycles Magboltz runs per E-field grid point. Higher values reduce statistical uncertainty in transport coefficients at the cost of longer gas-file generation. 2–5: smoke test; 10: default; 20–50: publication quality |
 | `max_electron_energy_eV`| float  | eV    | 2000.0                    | Upper energy bound for the Magboltz cross-section look-up table. Must exceed the maximum kinetic energy electrons reach near the wire (typically 500–1000 eV here). Too low a ceiling causes Magboltz to extrapolate, producing unphysical transport coefficients |
-| `n_field_points`        | int    | —     | 50                        | Number of logarithmically spaced E-field values at which Magboltz computes transport coefficients (from ~100 V/cm to `e_field_max_vcm`). More points give smoother interpolation; fewer points speed up gas-file generation |
+| `n_field_points`        | int    | —     | 50                        | Number of logarithmically spaced E-field values at which Magboltz computes transport coefficients (from `e_field_min_vcm` to `e_field_max_vcm`). More points give smoother interpolation; fewer points speed up gas-file generation |
+| `e_field_min_vcm`       | float  | V/cm  | 100.0                     | Lower E-field limit for the Magboltz transport table. Sets the gentle-drift end of the logarithmic grid; encoded in the `.gas` filename as `Ef{min}v-…`. Lower it only if the gas-gap field can fall below 100 V/cm |
 | `e_field_max_vcm`       | float  | V/cm  | 400000.0                  | Upper E-field limit for the Magboltz transport table. Must exceed the peak near-wire field E_peak = V_wire / (r × (ln(pitch/(2π r)) + π gap/pitch)). For the default geometry E_peak ≈ 156 kV/cm (2.6× margin at the default 400 kV/cm). The binary prints E_peak at startup and warns when `e_field_max_vcm < E_peak`; recommends ≥ 1.5× margin. The GUI "Auto" button fills in 2× E_peak rounded to the next 50 kV/cm |
 | `w_value_eV`            | float  | eV    | 26.0                      | Mean energy to create one electron–ion pair in the gas mixture (W-value). Determines primary electron count: `N = round(energy_keV × 1000 / w_value_eV)`. The measured value for Ar:CO2 70:30 is ~26 eV |
 
@@ -447,6 +466,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `time_step_ns`       | float | ns   | 0.5      | Width of each time bin in the `TProfile` waveforms (`p_anode_signal`, `p_cathode_signal`). Finer bins give better time resolution but larger ROOT histograms. 0.5 ns is sufficient to resolve the fast electron peak (~5–10 ns FWHM) |
 | `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
 | `store_drift_lines`  | bool  | —    | true     | When `true`, `AvalancheMicroscopic` records every intermediate collision step in the primary electron drift line (not just start and end), producing denser 3D path data for the GUI 3D Tracks viewer at the cost of larger ROOT files |
+| `ion_max_step_um`    | float | μm   | 5.0      | Cap on the `DriftLineRKF` integration step.  The stepper's steps otherwise grow geometrically (×10 per step) and the induced current is sampled only at drift-line points, so an uncapped surface-born ion's ~10 μm step spans ~5–8 ns right where i(t) varies fastest — producing an artificial flat shelf with a sharp kink ~8 ns after the electron spike.  5 μm resolves the early ion signal to ~1–2 ns at roughly 5× the ion-drift CPU; `0` disables the cap |
 
 ---
 
@@ -482,9 +502,12 @@ The ROOT file contains one subdirectory per (distance, x-position) combination a
 | `x_positions_cm: null` (random x) | `dist_0p7mm/` |
 | `x_positions_cm: [0.0]` | `dist_0p7mm_x0mm/` |
 | `x_positions_cm: [0.0, 0.18]` | `dist_0p7mm_x0mm/`, `dist_0p7mm_x1p8mm/` |
+| `source_distances_mm: null` (random distance) | `dist_rnd/` (or `dist_rnd_x0mm/` with fixed x) |
 
 The x-position suffix uses millimetres (× 10 relative to the cm config value) with
-decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).
+decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).  A negative
+distance uses an `m` prefix (e.g. −0.7 mm → `dist_m0p7mm`); a random distance uses
+the literal `dist_rnd`.
 
 **Per-distance histograms:**
 
@@ -499,6 +522,10 @@ decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).
 | `p_anode_signal`        | TProfile | Mean induced current on anode vs time [fC/ns]   |
 | `p_cathode_signal`      | TProfile | Mean induced current on cathode vs time [fC/ns] |
 | `p_cathode_top_signal`  | TProfile | Mean induced current on cathode_top vs time [fC/ns] |
+| `p_anode_electron`      | TProfile | Electron-only component of the anode current vs time [fC/ns] (prompt + delayed) |
+| `p_anode_ion`           | TProfile | Ion-only component of the anode current vs time [fC/ns] |
+| `p_cathode_electron`    | TProfile | Electron-only component of the cathode current vs time [fC/ns] |
+| `p_cathode_ion`         | TProfile | Ion-only component of the cathode current vs time [fC/ns] |
 
 **Summary graphs (in `summary/`):**
 
@@ -518,6 +545,8 @@ decimal points replaced by `p` (e.g. 0.18 cm → 1.8 mm → `x1p8mm`).
 | `cathode_charge_fC` | float | Integrated cathode charge for this event [fC] |
 | `anode` | vector\<float\> | Per-bin anode current waveform [fC/ns], length = `time_window_ns / time_step_ns` |
 | `cathode` | vector\<float\> | Per-bin cathode current waveform [fC/ns] |
+| `anode_e` / `anode_i` | vector\<float\> | Electron / ion component of the anode current [fC/ns]; the two sum to `anode` bin-by-bin |
+| `cathode_e` / `cathode_i` | vector\<float\> | Electron / ion component of the cathode current [fC/ns]; the two sum to `cathode` |
 | `primary_x/y/z` | vector\<float\> | 3D points along the primary electron drift path [cm]. 2 points (start + end) when `store_drift_lines = false`; full collision-step trajectory when `true` |
 | `cloud_x/y/z` | vector\<float\> | Start positions of secondary (avalanche) electron tracks [cm], up to 500 points |
 | `ion_x/y/z` | vector\<float\> | Flattened ion drift paths [cm], up to 100 ions |
@@ -533,7 +562,7 @@ One row per (source distance, x-position) combination.  Columns:
 
 | Column | Unit | Description |
 |--------|------|-------------|
-| `source_distance_mm` | mm | Signed y-distance of the photon interaction from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). See sign convention in *Detector geometry* |
+| `source_distance_mm` | mm | Signed y-distance of the photon interaction from the wire plane. Positive → readout cathode side (y < 0); negative → cathode_top side (y > 0). See sign convention in *Detector geometry*. The literal `random` when `source_distances_mm: null` (distance drawn per event) |
 | `x_position_cm` | cm | Fixed lateral x-position of the interaction. Empty (blank field) when `x_positions_cm: null` — i.e. the x-position was drawn uniformly at random each event |
 | `n_events` | — | Number of avalanche simulations run at this (distance, x-position) combination |
 | `n_interacted` | — | Events that produced at least one primary electron. Currently always equals `n_events` — every event interacts by construction |
@@ -591,6 +620,45 @@ The average anode waveform has two components:
 * **Slow ion component** (~5–8 μs physically): positive ions (CO2⁺) drift away from
   the wire toward both cathodes.  Their contribution to the anode signal has the same
   (positive) polarity as the electron component, producing a long positive tail.
+
+**Electron spike width.**  The simulated electron spike is extremely narrow
+(FWHM ≈ 0.2 ns — the intrinsic duration of a single avalanche, which multiplies within
+the last few wire radii where electrons move at >100 µm/ns).  Real measured pulses are
+~3 ns wide.  The difference is the W-value point-deposit approximation: all N ≈ 227
+primaries start at one point and are represented by one scaled avalanche, so they share
+a single arrival time.  In reality the primaries are distributed along the
+photoelectron + Auger track (~150–300 µm for 5.9 keV in Ar → 1.8–3.6 ns arrival spread
+at the ~83 µm/ns gap drift velocity) and each diffuses independently
+(σ_L ≈ 40 µm over a 0.7 mm drift → ~0.5 ns), and the readout electronics adds ~1 ns.
+The approximation is exact for the charge observables (Q_anode, Q_cathode, ratio) but
+discards the per-event time structure of the electron peak.
+
+**Why the ion tail opens with a plateau.**  Although the near-wire field is radial
+(E ∝ 1/r), the *induced* current scales as 1/r²: the ion drift velocity (v = μE) and
+the wire's Ramo weighting field both fall as 1/r.  Solving the ion motion in the 1/r
+field gives r²(t) = r₀²(1 + t/t₀), so
+
+> i(t) = i₀ / (1 + t/t₀),   with   t₀ = r₀² / (2 μ k)
+
+where r₀ is the ion's birth radius (≈ the 25 μm wire radius) and k = E·r is the field
+constant.  Because the induced current depends on r², which barely changes while the ion
+is still near r₀, i(t) is flat — a plateau — for t < t₀, then decays as 1/t once r²
+grows.  For ions born at the wire surface t₀ = r₀²/(2μk) ≈ 4–7 ns; a fit over a wider
+window returns a larger effective t₀ (~13 ns) because ions are born over a range of
+radii.  This is the differential form of the classic logarithmic ion charge
+Q(t) ∝ ln(1 + t/t₀).  `tools/plot_ion_tail.py` fits i₀/(1+t/t₀) to a run and overlays
+it in log-log and linear scale.  Beyond the near-wire region the current falls faster
+than 1/t as ions cross into the more uniform bulk field.
+
+**Drift-line discretization artifact (and the `ion_max_step_um` cap).**  Without a step
+cap, the first ~8 ns after the spike show an *artificially* flat shelf (constant to ~5
+digits) ending in a sharp kink: `DriftLineRKF` grows its integration steps geometrically
+(×10 per step) and the induced current is sampled only at the drift-line points, so a
+surface-born ion's ~10 μm step spans ~5–8 ns — exactly where i(t) should already have
+fallen by ~half.  All avalanche ions are born at nearly the same spot, so their step
+boundaries kink in lockstep instead of averaging out.  The `simulation.ion_max_step_um`
+cap (default 5 μm) shortens these segments so the early rollover is genuinely resolved;
+set it to 0 to recover the old (faster, under-sampled) behaviour.
 
 The full ion tail extends over ~5–8 μs (estimated from the CO2⁺ reduced mobility
 K₀ ≈ 1.7 cm²/(V·s) and the average gap field of ~13 600 V/cm).  With the default

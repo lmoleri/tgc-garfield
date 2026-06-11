@@ -445,6 +445,13 @@ class ConfigPanel(QScrollArea):
             "Off: primary electron shown as straight start→end line.\n"
             "On: full curved trajectory, but adds ~15 % CPU time per event."
         )
+        self.ion_max_step = self._dspin(0.0, 100.0, 1.0, 1, 5.0)
+        self.ion_max_step.setToolTip(
+            "Cap on the DriftLineRKF integration step [µm].\n"
+            "Resolves the early ion signal (first ~10 ns after the spike);\n"
+            "uncapped steps leave a flat-shelf artifact there.\n"
+            "0 disables; 5 µm costs ~5× ion-drift CPU."
+        )
 
         sim_form.addRow("Events",             self.n_events)
         sim_form.addRow("Max avalanche size", self.max_aval)
@@ -452,6 +459,7 @@ class ConfigPanel(QScrollArea):
         sim_form.addRow("Time step [ns]",     self.time_step)
         sim_form.addRow("Ion transport",      self.enable_ion_drift)
         sim_form.addRow("Store drift lines",  self.store_drift_lines)
+        sim_form.addRow("Ion max step [µm]",  self.ion_max_step)
         root_layout.addWidget(sim_box)
 
         # ── Output ────────────────────────────────────────────────────────
@@ -656,6 +664,7 @@ class ConfigPanel(QScrollArea):
                 "time_step_ns":       self.time_step.value(),
                 "enable_ion_drift":   self.enable_ion_drift.isChecked(),
                 "store_drift_lines":  self.store_drift_lines.isChecked(),
+                "ion_max_step_um":    self.ion_max_step.value(),
             },
         }
 
@@ -727,6 +736,7 @@ class ConfigPanel(QScrollArea):
         self.time_step.setValue(       sim.get("time_step_ns", 0.5))
         self.enable_ion_drift.setChecked(sim.get("enable_ion_drift", True))
         self.store_drift_lines.setChecked(sim.get("store_drift_lines", True))
+        self.ion_max_step.setValue(      sim.get("ion_max_step_um", 5.0))
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +848,12 @@ class ResultsPanel(QTabWidget):
         self.wave_event_label = QLabel("— / —")
         self.wave_event_label.setMinimumWidth(55)
         sel_h.addWidget(self.wave_event_label)
+        sel_h.addSpacing(8)
+        self.wave_split_cb = QCheckBox("e⁻/ion components")
+        self.wave_split_cb.setToolTip(
+            "Overlay the electron and ion contributions to the induced current\n"
+            "(requires a ROOT file produced with the component-split branches).")
+        sel_h.addWidget(self.wave_split_cb)
         wave_layout.addWidget(sel_row)
 
         # — per-event info —
@@ -865,6 +881,7 @@ class ResultsPanel(QTabWidget):
         self.wave_dist_combo.currentIndexChanged.connect(self._on_wave_dist_changed)
         self.wave_xpos_combo.currentIndexChanged.connect(self._on_wave_xpos_changed)
         self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
+        self.wave_split_cb.toggled.connect(self._update_waveform_plot)
 
         self.addTab(wave_widget, "Waveforms")
 
@@ -1520,6 +1537,7 @@ class ResultsPanel(QTabWidget):
         # Force canvas recreation for the new run
         self._root_canvas   = None
         self._charge_canvas = None
+        self._warned_no_split = False
 
         self._waveform_data.clear()
         self.wave_dist_combo.blockSignals(True)
@@ -1555,13 +1573,19 @@ class ResultsPanel(QTabWidget):
                         anode   = np.stack(tree["anode"].array(library="np"))
                         cathode = np.stack(tree["cathode"].array(library="np"))
 
-                        self._waveform_data.setdefault(dist_label, {})[xpos_label] = {
+                        data = {
                             "times":   times,
                             "anode":   anode,
                             "cathode": cathode,
                             "mean_a":  mean_a,
                             "mean_c":  mean_c,
                         }
+                        # e⁻/ion component branches (newer ROOT files only)
+                        if "anode_e" in tree.keys():
+                            for br in ("anode_e", "anode_i",
+                                       "cathode_e", "cathode_i"):
+                                data[br] = np.stack(tree[br].array(library="np"))
+                        self._waveform_data.setdefault(dist_label, {})[xpos_label] = data
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
                 # Populate dist combos in sorted order (random "—" first)
@@ -1710,6 +1734,20 @@ class ResultsPanel(QTabWidget):
         nbins   = len(times)
         dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
 
+        # Optional e⁻/ion component overlay
+        split = self.wave_split_cb.isChecked()
+        if split and "anode_e" not in data:
+            if not getattr(self, "_warned_no_split", False):
+                self.append_log(
+                    "[GUI] This ROOT file has no e⁻/ion component branches "
+                    "(produced by an older tgc_sim) — overlay disabled.")
+                self._warned_no_split = True
+            split = False
+        anode_e   = data["anode_e"][evt_idx].astype("f8")   if split else None
+        anode_i   = data["anode_i"][evt_idx].astype("f8")   if split else None
+        cathode_e = data["cathode_e"][evt_idx].astype("f8") if split else None
+        cathode_i = data["cathode_i"][evt_idx].astype("f8") if split else None
+
         qa    = float(-np.sum(anode)   * dt)
         qc    = float( np.sum(cathode) * dt)
         ratio = qc / qa if qa != 0 else float("nan")
@@ -1735,7 +1773,8 @@ class ResultsPanel(QTabWidget):
             self._root_objects.clear()   # release previous objects
 
             def _draw_pad(pad_idx: int, y_evt: np.ndarray, y_mean: np.ndarray,
-                          signal_name: str, line_color: int):
+                          signal_name: str, line_color: int,
+                          y_e: np.ndarray = None, y_i: np.ndarray = None):
                 self._root_canvas.cd(pad_idx)
                 ROOT.gPad.SetGrid()
                 ga = ROOT.TGraph(nbins, times, y_evt)
@@ -1751,15 +1790,29 @@ class ResultsPanel(QTabWidget):
                 gm.SetLineStyle(2)    # dashed mean
                 ga.Draw("AL")
                 gm.Draw("L same")
-                leg = ROOT.TLegend(0.65, 0.75, 0.88, 0.88)
+                leg = ROOT.TLegend(0.65, 0.70, 0.88, 0.88)
                 leg.AddEntry(ga, "this event", "L")
                 leg.AddEntry(gm, "mean",       "L")
+                if y_e is not None:
+                    ge = ROOT.TGraph(nbins, times, y_e)
+                    ge.SetLineColor(ROOT.kGreen + 2)
+                    ge.SetLineWidth(1)
+                    gi = ROOT.TGraph(nbins, times, y_i)
+                    gi.SetLineColor(ROOT.kMagenta + 1)
+                    gi.SetLineWidth(1)
+                    ge.Draw("L same")
+                    gi.Draw("L same")
+                    leg.AddEntry(ge, "e^{-} component", "L")
+                    leg.AddEntry(gi, "ion component",   "L")
+                    self._root_objects.extend([ge, gi])
                 leg.SetBorderSize(0)
                 leg.Draw()
                 self._root_objects.extend([ga, gm, leg])
 
-            _draw_pad(1, anode,   mean_a, "Anode",   ROOT.kBlue + 1)
-            _draw_pad(2, cathode, mean_c, "Cathode", ROOT.kRed  + 1)
+            _draw_pad(1, anode,   mean_a, "Anode",   ROOT.kBlue + 1,
+                      anode_e, anode_i)
+            _draw_pad(2, cathode, mean_c, "Cathode", ROOT.kRed  + 1,
+                      cathode_e, cathode_i)
 
             self._root_canvas.Update()
 
