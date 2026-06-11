@@ -20,9 +20,11 @@
 //              constant τ = ε₀ε_r ρ_s L²/(π²d). The Ramo weighting potential is
 //              the wire-screened analytic cathode weighting potential of the
 //              ComponentAnalyticField, scaled by the dielectric transparency
-//              factor α = ε_r·gap/(d+ε_r·gap) and relaxing as exp(−t/τ);
-//              the delayed signal (both during drift and after collection) is
-//              computed via ComponentUser::SetDelayedWeightingPotential.
+//              factor α = ε_r·gap/(d+ε_r·gap). The exp(−t/τ) relaxation (during
+//              drift and after collection) is applied as an exact exponential
+//              post-filter on the binned pad current — mathematically identical
+//              to the separable delayed weighting potential W_s(x)·e^{−t/τ},
+//              but with no per-drift-step cost.
 //
 // Each primary electron is transported by AvalancheMicroscopic.
 // Induced signals are computed via Shockley-Ramo weighting fields.
@@ -652,9 +654,15 @@ void BuildGeometry(ComponentAnalyticField& cmp, MediumMagboltz& gas,
   }
 }
 
-void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
-                           const ReadoutConfig& ro, const GeometryConfig& geom,
-                           const SimulationConfig& sim) {
+// Derived parameters of the resistive readout model, shared between the
+// weighting-potential setup and the per-event relaxation filter.
+struct ResistiveParams {
+  double alpha;  // dielectric transparency: ε_r·gap / (d_ins + ε_r·gap)
+  double tauNs;  // surface-potential relaxation time constant [ns]
+};
+
+ResistiveParams ComputeResistiveParams(const ReadoutConfig& ro,
+                                       const GeometryConfig& geom) {
   const double epsR   = (ro.insulatorMaterial == "fr4") ? 4.6 : 3.5;
   const double dInsCm = ro.insulatorThicknessUm * 1e-4;        // μm → cm
   const double alpha  = epsR * geom.gapCm / (dInsCm + epsR * geom.gapCm);
@@ -667,6 +675,12 @@ void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
   const double L_m    = ro.resistiveLayerSizeCm * 0.5e-2;       // cm → m
   const double tauNs  = eps0SI * epsR * ro.surfaceResistivityOhmSq
                         * (L_m * L_m) / (M_PI * M_PI * dInsM) * 1e9;
+  return {alpha, tauNs};
+}
+
+void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
+                           const ReadoutConfig& ro, const GeometryConfig& geom) {
+  const auto [alpha, tauNs] = ComputeResistiveParams(ro, geom);
 
   // Spatial shape: the wire-screened analytic weighting potential of the
   // cathode plane (grounded wires suppress it near the wire and in the top
@@ -685,41 +699,32 @@ void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
         wx *= alpha; wy *= alpha; wz *= alpha;
       }, "cathode");
 
-  if (ro.enableDelayedSignal) {
-    // Delayed weighting potential: W_d(x,y,z,t) = W_s(x,y,z) × (exp(−t/τ) − 1)
-    // Total W = W_s + W_d = W_s × exp(−t/τ) → decays to 0 as surface potential
-    // at landing point is pulled to ground by the resistive sheet.
-    cmp.SetDelayedWeightingPotential(
-        [&fieldCmp, alpha, tauNs](const double x, const double y, const double z,
-                                  const double t) {
-          return alpha * fieldCmp.WeightingPotential(x, y, z, "cathode")
-                 * (std::exp(-t / tauNs) - 1.0);
-        }, "cathode");
-
-    cmp.SetDelayedWeightingField(
-        [&fieldCmp, alpha, tauNs](const double x, const double y, const double z,
-                                  const double t,
-                                  double& wx, double& wy, double& wz) {
-          fieldCmp.WeightingField(x, y, z, wx, wy, wz, "cathode");
-          const double f = alpha * (std::exp(-t / tauNs) - 1.0);
-          wx *= f; wy *= f; wz *= f;
-        }, "cathode");
-
-    // Sample delayed signal over max(5τ, full time window), 200 points
-    const double maxDelayNs = std::max(5.0 * tauNs, sim.timeWindowNs);
-    constexpr std::size_t nDelayPts = 200;
-    std::vector<double> dtimes(nDelayPts);
-    for (std::size_t i = 0; i < nDelayPts; ++i)
-      dtimes[i] = (i + 1) * maxDelayNs / nDelayPts;
-    cmp.SetDelayedSignalTimes(dtimes);
-  }
-
   std::cout << "  Resistive readout: α = " << alpha
             << ", τ = " << tauNs << " ns"
             << " (" << ro.resistiveLayerSizeCm << " cm layer, 2-edge ground)"
             << ", wire-screened analytic weighting potential"
-            << (ro.enableDelayedSignal ? "" : " (delayed signal disabled)")
+            << (ro.enableDelayedSignal ? ", relaxation applied as post-filter"
+                                       : " (relaxation disabled)")
             << "\n";
+}
+
+// Apply the resistive-layer relaxation to a binned prompt pad current:
+//
+//   i_out(t) = i_p(t) − (1/τ) ∫₀^t i_p(t′) e^{−(t−t′)/τ} dt′
+//
+// Exactly equivalent to evolving the separable delayed weighting potential
+// W(x,t) = W_s(x)·e^{−t/τ} per drift step (the time-dependent Ramo theorem for
+// resistive elements), but O(nBins) per event instead of ~200 weighting-potential
+// evaluations plus a bin-spreading loop per drift step.  The recursion is exact
+// for piecewise-constant i_p within a bin.
+void ApplyResistiveRelaxation(std::vector<double>& i, const double dtNs,
+                              const double tauNs) {
+  const double a = std::exp(-dtNs / tauNs);
+  double conv = 0.;  // ∫₀^t e^{−(t−t′)/τ} i_p(t′) dt′, updated recursively
+  for (auto& s : i) {
+    conv = conv * a + s * tauNs * (1. - a);
+    s -= conv / tauNs;
+  }
 }
 
 void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
@@ -730,12 +735,12 @@ void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
   sensor.AddComponent(&cmp);
   sensor.AddElectrode(&cmp, "anode");       // all wires together
   // For resistive readout, use a ComponentUser with the dielectric-corrected
-  // (and time-delayed) weighting potential for the cathode electrode.
+  // weighting potential for the cathode electrode; the exp(−t/τ) relaxation is
+  // applied later as a post-filter on the binned pad signal.
   sensor.AddElectrode(cmpReadout ? static_cast<Garfield::Component*>(cmpReadout)
                                  : static_cast<Garfield::Component*>(&cmp),
                       "cathode");           // bottom cathode plane (readout)
   sensor.AddElectrode(&cmp, "cathode_top"); // top cathode plane (Ramo cross-check)
-  if (cmpReadout && cfg.readout.enableDelayedSignal) sensor.EnableDelayedSignal();
 
   const std::size_t nBins =
       static_cast<std::size_t>(std::round(sim.timeWindowNs / sim.timeStepNs));
@@ -820,6 +825,14 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
   std::vector<float> anodeSigE(nBins, 0.f), anodeSigI(nBins, 0.f);
   std::vector<float> cathodeSigE(nBins, 0.f), cathodeSigI(nBins, 0.f);
+  // Per-bin readout buffers; in resistive mode the pad ("cathode") buffers get
+  // the relaxation filter applied before any output is filled from them.
+  std::vector<double> bufA(nBins), bufC(nBins), bufT(nBins);
+  std::vector<double> bufAe(nBins), bufAi(nBins), bufCe(nBins), bufCi(nBins);
+  const bool resistiveRelax = cfg.readout.type == "resistive" &&
+                              cfg.readout.enableDelayedSignal;
+  const double relaxTauNs = resistiveRelax
+      ? ComputeResistiveParams(cfg.readout, cfg.geometry).tauNs : 0.;
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
   signalTree.Branch("event",             &evtId, "event/I");
@@ -1013,37 +1026,43 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     // accumulator that AvalancheMicroscopic does not populate (it only calls
     // AddSignal into the time-binned arrays), so GetInducedCharge always returns
     // zero here.  The manual integral below is the correct approach.
+    for (std::size_t k = 0; k < nBins; ++k) {
+      bufA[k] = sensor.GetSignal("anode",       k);
+      bufC[k] = sensor.GetSignal("cathode",     k);
+      bufT[k] = sensor.GetSignal("cathode_top", k);
+      // Species split: prompt e⁻/ion components; sums exactly to GetSignal.
+      bufAe[k] = sensor.GetElectronSignal("anode",   k);
+      bufAi[k] = sensor.GetIonSignal     ("anode",   k);
+      bufCe[k] = sensor.GetElectronSignal("cathode", k);
+      bufCi[k] = sensor.GetIonSignal     ("cathode", k);
+    }
+    if (resistiveRelax) {
+      // Pad relaxation; the filter is linear, so the e⁻/ion components are
+      // filtered independently and still sum to the filtered total.
+      ApplyResistiveRelaxation(bufC,  sim.timeStepNs, relaxTauNs);
+      ApplyResistiveRelaxation(bufCe, sim.timeStepNs, relaxTauNs);
+      ApplyResistiveRelaxation(bufCi, sim.timeStepNs, relaxTauNs);
+    }
+
     double rawAnode = 0., rawCathode = 0., rawCathodeTop = 0.;
     for (std::size_t k = 0; k < nBins; ++k) {
-      const double sigA = sensor.GetSignal("anode",       k);
-      const double sigC = sensor.GetSignal("cathode",     k);
-      const double sigT = sensor.GetSignal("cathode_top", k);
-      // Species split: prompt + delayed of each; sums exactly to GetSignal.
-      const double sigAe = sensor.GetElectronSignal("anode", k)
-                         + sensor.GetDelayedElectronSignal("anode", k);
-      const double sigAi = sensor.GetIonSignal("anode", k)
-                         + sensor.GetDelayedIonSignal("anode", k);
-      const double sigCe = sensor.GetElectronSignal("cathode", k)
-                         + sensor.GetDelayedElectronSignal("cathode", k);
-      const double sigCi = sensor.GetIonSignal("cathode", k)
-                         + sensor.GetDelayedIonSignal("cathode", k);
-      rawAnode      += sigA;
-      rawCathode    += sigC;
-      rawCathodeTop += sigT;
+      rawAnode      += bufA[k];
+      rawCathode    += bufC[k];
+      rawCathodeTop += bufT[k];
       const double t = (static_cast<double>(k) + 0.5) * sim.timeStepNs;
-      pAnodeSignal.Fill(t,      sigA * nPrimary);
-      pCathodeSignal.Fill(t,    sigC * nPrimary);
-      pCathodeTopSignal.Fill(t, sigT * nPrimary);
-      pAnodeElec.Fill(t,   sigAe * nPrimary);
-      pAnodeIon.Fill(t,    sigAi * nPrimary);
-      pCathodeElec.Fill(t, sigCe * nPrimary);
-      pCathodeIon.Fill(t,  sigCi * nPrimary);
-      anodeSig[k]   = static_cast<float>(sigA * nPrimary);
-      cathodeSig[k] = static_cast<float>(sigC * nPrimary);
-      anodeSigE[k]   = static_cast<float>(sigAe * nPrimary);
-      anodeSigI[k]   = static_cast<float>(sigAi * nPrimary);
-      cathodeSigE[k] = static_cast<float>(sigCe * nPrimary);
-      cathodeSigI[k] = static_cast<float>(sigCi * nPrimary);
+      pAnodeSignal.Fill(t,      bufA[k] * nPrimary);
+      pCathodeSignal.Fill(t,    bufC[k] * nPrimary);
+      pCathodeTopSignal.Fill(t, bufT[k] * nPrimary);
+      pAnodeElec.Fill(t,   bufAe[k] * nPrimary);
+      pAnodeIon.Fill(t,    bufAi[k] * nPrimary);
+      pCathodeElec.Fill(t, bufCe[k] * nPrimary);
+      pCathodeIon.Fill(t,  bufCi[k] * nPrimary);
+      anodeSig[k]    = static_cast<float>(bufA[k] * nPrimary);
+      cathodeSig[k]  = static_cast<float>(bufC[k] * nPrimary);
+      anodeSigE[k]   = static_cast<float>(bufAe[k] * nPrimary);
+      anodeSigI[k]   = static_cast<float>(bufAi[k] * nPrimary);
+      cathodeSigE[k] = static_cast<float>(bufCe[k] * nPrimary);
+      cathodeSigI[k] = static_cast<float>(bufCi[k] * nPrimary);
     }
 
     const double qAnode      = -rawAnode      * sim.timeStepNs * nPrimary; // [fC]
@@ -1377,8 +1396,7 @@ int main(int argc, char* argv[]) {
     ComponentUser cmpReadout;
     if (cfg.readout.type == "resistive") {
       std::cout << "\nSetting up resistive readout...\n";
-      SetupResistiveReadout(cmpReadout, cmp, cfg.readout, cfg.geometry,
-                            cfg.simulation);
+      SetupResistiveReadout(cmpReadout, cmp, cfg.readout, cfg.geometry);
     }
 
     Sensor sensor;

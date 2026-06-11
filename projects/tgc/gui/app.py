@@ -247,9 +247,10 @@ class ConfigPanel(QScrollArea):
         self.delayed_signal_cb = QCheckBox()
         self.delayed_signal_cb.setChecked(True)
         self.delayed_signal_cb.setToolTip(
-            "When unchecked, skips the time-varying delayed weighting potential.\n"
-            "The static α-corrected weighting potential is still applied.\n"
-            "Disabling removes the ~200× per-step overhead and gives conductive-like speed."
+            "When checked, the resistive relaxation (surface potential decay with τ)\n"
+            "is applied to the pad waveform as an exact exponential post-filter —\n"
+            "negligible cost. When unchecked, only the static α-scaled weighting\n"
+            "potential is used (no relaxation tail)."
         )
 
         ro_form.addRow("Type",                   self.readout_type)

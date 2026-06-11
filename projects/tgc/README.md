@@ -212,11 +212,23 @@ Two corrections apply when `readout.type = "resistive"`:
    - *After collection*: the fixed surface charge couples to the pad through a
      decaying potential (exponential tail with characteristic time τ).
 
-   Both contributions are computed automatically by Garfield++'s
-   `ComponentUser::SetDelayedWeightingPotential` framework and are included in
-   `sensor.GetSignal("cathode", k)` once `sensor.EnableDelayedSignal()` is active.
+   Because the delayed weighting potential is separable, W(x,y,z,t) =
+   W(x,y,z)·exp(−t/τ), both contributions reduce *exactly* to a causal
+   exponential filter applied to the binned prompt pad current:
+
+   > i_pad(t) = i_prompt(t) − (1/τ) ∫₀ᵗ i_prompt(t′) e^{−(t−t′)/τ} dt′
+
+   The simulation records the cheap prompt signal and applies this filter once
+   per event (`ApplyResistiveRelaxation`).  This is mathematically identical to
+   Garfield++'s per-drift-step `SetDelayedWeightingPotential` machinery for this
+   model, but has no per-step cost (the old approach evaluated the weighting
+   potential at 200 delayed times per drift step and spread each into the time
+   bins — resistive runs now cost the same as conductive ones) and is exact at
+   the time-bin resolution instead of a 200-point sampling.
    The τ printed to stdout at startup can be used to set `time_window_ns` long
-   enough to capture the desired fraction of the delayed charge.
+   enough to capture the desired fraction of the delayed charge (≥ 5τ for the
+   full relaxation; pair a long window with a coarser `time_step_ns` to keep the
+   bin count reasonable).
 
 ---
 
@@ -428,7 +440,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_material`           | string | —     | `"kapton"`      | Insulating substrate material. Sets the relative permittivity used for the dielectric correction and τ calculation. `"kapton"` → ε_r = 3.5; `"fr4"` → ε_r = 4.6. Ignored when `type = "conductive"` |
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
-| `enable_delayed_signal`        | bool   | —     | `true`          | When `false`, skips `SetDelayedWeightingPotential` — the static α-corrected weighting potential is still applied, but `sensor.EnableDelayedSignal()` is not called. Removes the ~200× per-step overhead for exploratory runs. Ignored when `type = "conductive"` |
+| `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
 
 ### `source`
 
