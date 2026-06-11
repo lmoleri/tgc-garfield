@@ -133,6 +133,8 @@ struct SimulationConfig {
                                         // growing steps under-sample the near-wire ion
                                         // current (flat-shelf artifact in the first
                                         // ~8 ns after the electron spike).
+  int         randomSeed       = 0;     // 0 → randomize per run (ROOT TUUID);
+                                        // >0 → fixed seed for reproducible runs
 };
 
 // ─── 3D-visualisation display limits ─────────────────────────────────────────
@@ -463,6 +465,7 @@ Config LoadConfig(const fs::path& path) {
     cfg.simulation.enableIonDrift   = ReadBool  (*s, "simulation", "enable_ion_drift",   cfg.simulation.enableIonDrift);
     cfg.simulation.storeDriftLines  = ReadBool  (*s, "simulation", "store_drift_lines",  cfg.simulation.storeDriftLines);
     cfg.simulation.ionMaxStepUm     = ReadDouble(*s, "simulation", "ion_max_step_um",    cfg.simulation.ionMaxStepUm);
+    cfg.simulation.randomSeed       = ReadInt   (*s, "simulation", "random_seed",        cfg.simulation.randomSeed);
   }
 
   if (cfg.readout.type != "conductive" && cfg.readout.type != "resistive")
@@ -499,6 +502,7 @@ Config LoadConfig(const fs::path& path) {
   if (cfg.simulation.nEvents   == 0)   throw std::runtime_error("simulation.n_events must be at least 1");
   if (cfg.simulation.timeWindowNs <= 0.) throw std::runtime_error("simulation.time_window_ns must be positive");
   if (cfg.simulation.timeStepNs   <= 0.) throw std::runtime_error("simulation.time_step_ns must be positive");
+  if (cfg.simulation.randomSeed   <  0)  throw std::runtime_error("simulation.random_seed must be >= 0");
 
   return cfg;
 }
@@ -1261,7 +1265,8 @@ json ConfigToJson(const Config& cfg) {
       {"time_step_ns",       cfg.simulation.timeStepNs},
       {"enable_ion_drift",   cfg.simulation.enableIonDrift},
       {"store_drift_lines",  cfg.simulation.storeDriftLines},
-      {"ion_max_step_um",    cfg.simulation.ionMaxStepUm}
+      {"ion_max_step_um",    cfg.simulation.ionMaxStepUm},
+      {"random_seed",        cfg.simulation.randomSeed}
     }}
   };
 }
@@ -1290,10 +1295,11 @@ int main(int argc, char* argv[]) {
     gStyle->SetOptStat(1110);
     TH1::AddDirectory(false);
     TH1::StatOverflows(true);
-    gRandom->SetSeed(0);
-
     const auto opts = ParseCli(argc, argv);
     Config cfg = LoadConfig(opts.configPath);
+
+    // Seed 0 → ROOT draws a fresh TUUID-based seed each run; >0 → reproducible.
+    gRandom->SetSeed(static_cast<UInt_t>(cfg.simulation.randomSeed));
 
     if (opts.singleDistanceMm)
       cfg.source.fixedDistMm = std::vector<double>{*opts.singleDistanceMm};

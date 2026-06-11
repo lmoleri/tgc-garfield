@@ -452,6 +452,11 @@ class ConfigPanel(QScrollArea):
             "uncapped steps leave a flat-shelf artifact there.\n"
             "0 disables; 5 µm costs ~5× ion-drift CPU."
         )
+        self.random_seed = self._spin(0, 2147483647, 0)
+        self.random_seed.setToolTip(
+            "Random-number seed.\n"
+            "0 = randomize each run; >0 = fixed seed for reproducible runs."
+        )
 
         sim_form.addRow("Events",             self.n_events)
         sim_form.addRow("Max avalanche size", self.max_aval)
@@ -460,6 +465,7 @@ class ConfigPanel(QScrollArea):
         sim_form.addRow("Ion transport",      self.enable_ion_drift)
         sim_form.addRow("Store drift lines",  self.store_drift_lines)
         sim_form.addRow("Ion max step [µm]",  self.ion_max_step)
+        sim_form.addRow("Random seed",        self.random_seed)
         root_layout.addWidget(sim_box)
 
         # ── Output ────────────────────────────────────────────────────────
@@ -665,6 +671,7 @@ class ConfigPanel(QScrollArea):
                 "enable_ion_drift":   self.enable_ion_drift.isChecked(),
                 "store_drift_lines":  self.store_drift_lines.isChecked(),
                 "ion_max_step_um":    self.ion_max_step.value(),
+                "random_seed":        self.random_seed.value(),
             },
         }
 
@@ -737,6 +744,7 @@ class ConfigPanel(QScrollArea):
         self.enable_ion_drift.setChecked(sim.get("enable_ion_drift", True))
         self.store_drift_lines.setChecked(sim.get("store_drift_lines", True))
         self.ion_max_step.setValue(      sim.get("ion_max_step_um", 5.0))
+        self.random_seed.setValue(       int(sim.get("random_seed", 0)))
 
 
 # ---------------------------------------------------------------------------

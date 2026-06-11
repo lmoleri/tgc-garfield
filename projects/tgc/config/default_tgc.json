@@ -48,6 +48,7 @@
     "time_step_ns": 0.1,
     "enable_ion_drift": true,
     "store_drift_lines": true,
-    "ion_max_step_um": 5.0
+    "ion_max_step_um": 5.0,
+    "random_seed": 0
   }
 }
