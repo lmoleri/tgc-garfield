@@ -11,6 +11,7 @@
     "insulator_material": "kapton",
     "insulator_thickness_um": 100.0,
     "surface_resistivity_ohm_sq": 500000.0,
+    "resistive_layer_size_cm": 20.0,
     "enable_delayed_signal": true
   },
   "source": {

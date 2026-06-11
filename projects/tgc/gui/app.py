@@ -237,6 +237,13 @@ class ConfigPanel(QScrollArea):
         self.surface_resistivity = self._dspin(1.0, 1e7, 100.0, 1, 500.0)
         self.surface_resistivity.setToolTip("Resistive layer surface resistivity [kΩ/sq]")
 
+        self.resistive_layer_size = self._dspin(0.1, 200.0, 1.0, 1, 20.0)
+        self.resistive_layer_size.setToolTip(
+            "Resistive-layer size (square) [cm]; grounded on the two edges parallel to the\n"
+            "wires, so charge relaxes across the wire array over this span — this sets the\n"
+            "relaxation time constant τ (τ ∝ size²)."
+        )
+
         self.delayed_signal_cb = QCheckBox()
         self.delayed_signal_cb.setChecked(True)
         self.delayed_signal_cb.setToolTip(
@@ -249,6 +256,7 @@ class ConfigPanel(QScrollArea):
         ro_form.addRow("Insulator material",     self.insulator_material)
         ro_form.addRow("Thickness [μm]",         self.insulator_thickness)
         ro_form.addRow("Resistivity [kΩ/sq]",    self.surface_resistivity)
+        ro_form.addRow("Resistive layer [cm]",   self.resistive_layer_size)
         ro_form.addRow("Delayed signal",         self.delayed_signal_cb)
         root_layout.addWidget(ro_box)
 
@@ -554,6 +562,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_material.setEnabled(resistive)
         self.insulator_thickness.setEnabled(resistive)
         self.surface_resistivity.setEnabled(resistive)
+        self.resistive_layer_size.setEnabled(resistive)
         self.delayed_signal_cb.setEnabled(resistive)
 
     # ── file dialogs ─────────────────────────────────────────────────────
@@ -617,6 +626,7 @@ class ConfigPanel(QScrollArea):
                 "insulator_material":         ins_mat,
                 "insulator_thickness_um":     self.insulator_thickness.value(),
                 "surface_resistivity_ohm_sq": self.surface_resistivity.value() * 1000.0,
+                "resistive_layer_size_cm":    self.resistive_layer_size.value(),
                 "enable_delayed_signal":      self.delayed_signal_cb.isChecked(),
             },
             "source": {
@@ -672,6 +682,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_material.setCurrentIndex(0 if ins_mat == "kapton" else 1)
         self.insulator_thickness.setValue(ro.get("insulator_thickness_um", 100.0))
         self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
+        self.resistive_layer_size.setValue(ro.get("resistive_layer_size_cm", 20.0))
         self.delayed_signal_cb.setChecked(ro.get("enable_delayed_signal", True))
 
         s = d.get("source", {})

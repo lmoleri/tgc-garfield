@@ -91,6 +91,8 @@ struct ReadoutConfig {
   std::string insulatorMaterial       = "kapton";     // "kapton" | "fr4"
   double      insulatorThicknessUm    = 100.0;
   double      surfaceResistivityOhmSq = 500e3;
+  double      resistiveLayerSizeCm    = 20.0;  // square sheet side [cm]; the two grounded
+                                               // edges (parallel to the wires) are this far apart
   bool        enableDelayedSignal     = true;  // if false, skip SetDelayedWeightingPotential
 };
 
@@ -400,6 +402,8 @@ Config LoadConfig(const fs::path& path) {
                                                       cfg.readout.insulatorThicknessUm);
     cfg.readout.surfaceResistivityOhmSq = ReadDouble(*r, "readout", "surface_resistivity_ohm_sq",
                                                       cfg.readout.surfaceResistivityOhmSq);
+    cfg.readout.resistiveLayerSizeCm    = ReadDouble(*r, "readout", "resistive_layer_size_cm",
+                                                      cfg.readout.resistiveLayerSizeCm);
     cfg.readout.enableDelayedSignal     = ReadBool  (*r, "readout", "enable_delayed_signal",
                                                       cfg.readout.enableDelayedSignal);
   }
@@ -462,6 +466,8 @@ Config LoadConfig(const fs::path& path) {
       throw std::runtime_error("readout.insulator_thickness_um must be positive");
     if (cfg.readout.surfaceResistivityOhmSq <= 0.)
       throw std::runtime_error("readout.surface_resistivity_ohm_sq must be positive");
+    if (cfg.readout.resistiveLayerSizeCm <= 0.)
+      throw std::runtime_error("readout.resistive_layer_size_cm must be positive");
   }
 
   if (cfg.geometry.wirePitchCm <= 0.)  throw std::runtime_error("geometry.wire_pitch_cm must be positive");
@@ -641,10 +647,12 @@ void SetupResistiveReadout(ComponentUser& cmp,
   const double dInsCm = ro.insulatorThicknessUm * 1e-4;        // μm → cm
   const double alpha  = epsR * geom.gapCm / (dInsCm + epsR * geom.gapCm);
 
-  // τ = ε₀ ε_r ρ_s L² / (π² d_ins),  L = half wire-array width [m]
+  // τ = ε₀ ε_r ρ_s L² / (π² d_ins).
+  // The resistive sheet is grounded on its two edges parallel to the wires, separated by
+  // resistiveLayerSizeCm across the wire direction; L = half that span.
   const double eps0SI = 8.854e-12;                              // F/m
   const double dInsM  = ro.insulatorThicknessUm * 1e-6;        // μm → m
-  const double L_m    = geom.nWires * geom.wirePitchCm * 0.5e-2; // cm → m
+  const double L_m    = ro.resistiveLayerSizeCm * 0.5e-2;       // cm → m
   const double tauNs  = eps0SI * epsR * ro.surfaceResistivityOhmSq
                         * (L_m * L_m) / (M_PI * M_PI * dInsM) * 1e9;
 
@@ -694,6 +702,7 @@ void SetupResistiveReadout(ComponentUser& cmp,
 
   std::cout << "  Resistive readout: α = " << alpha
             << ", τ = " << tauNs << " ns"
+            << " (" << ro.resistiveLayerSizeCm << " cm layer, 2-edge ground)"
             << (ro.enableDelayedSignal ? "" : " (delayed signal disabled)")
             << "\n";
 }

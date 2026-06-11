@@ -60,14 +60,17 @@ acts as a grounded conductor for DC fields), but the Ramo weighting potential
 and the cathode signal shape are modified.
 
 ```
-  y = −gap     ─── resistive layer (infinitely thin, ρ_s [Ω/sq]) ───
+  y = −gap     ── resistive layer (20 cm, ρ_s [Ω/sq], ∥-wire edges grounded) ──
                ███████  insulator (Kapton/FR4, thickness d)  ███████
-  y = −gap−d   ────────────── conductive readout pads ──────────────
+  y = −gap−d   ──────────── conductive readout pad (current size) ───────────
 ```
 
-The resistive layer is grounded at its four edges.  Deposited charge remains at
-its landing point but the local surface potential decays with time constant
-τ = ε₀ ε_r ρ_s L²/(π² d), where L = nWires × wirePitch / 2.
+The resistive layer is a square sheet (default 20 × 20 cm, `resistive_layer_size_cm`)
+grounded along its two edges **parallel to the wires**; the conductive readout pad behind it
+keeps its usual (smaller) size.  Because only those two edges are grounded, deposited charge
+relaxes *across* the wire array toward them, and the local surface potential decays with time
+constant τ = ε₀ ε_r ρ_s L²/(π² d), where L = `resistive_layer_size_cm` / 2 (half the
+across-wire span between the grounded edges).
 
 | Parameter         | Value        | Notes                               |
 |-------------------|--------------|-------------------------------------|
