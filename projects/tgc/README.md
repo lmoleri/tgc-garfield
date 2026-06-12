@@ -230,6 +230,36 @@ Two corrections apply when `readout.type = "resistive"`:
    full relaxation; pair a long window with a coarser `time_step_ns` to keep the
    bin count reasonable).
 
+#### Why the electron spike appears on the simulated cathode
+
+The cathode waveform shows a sharp electron spike in **both** readout modes, and
+this is expected.  In conductive mode it is direct Ramo induction: the avalanche
+electrons deliver their (wire-screened, hence small) share of pad charge within
+~1 ns, so even a few fC arriving that fast produces a tall current spike
+(~4 fC/ns peak at default settings) — prominent in *current*, minor in *charge*.
+
+In resistive mode the spike survives because a resistive sheet is **transparent
+to fast signals**.  The sheet can only screen a lateral field disturbance of
+scale λ on a time scale τ_screen(λ) ≈ ρ_s ε₀ ε_r λ²/d.  For the defaults
+(500 kΩ/sq, 100 μm Kapton) and the ~1.4 mm induction footprint of an avalanche,
+τ_screen ≈ 100–300 ns — the sheet cannot react within the ~1 ns spike, so the
+induction passes through to the pad unattenuated.  (The same physics lets ATLAS
+TGC pickup strips behind ~1 MΩ/sq graphite cathodes deliver 25 ns-class trigger
+signals.)  Consistently, the exp(−t/τ) post-filter with τ = 157 μs removes only
+~10⁻⁵ of a 1 ns spike.  Note the single-τ filter models global drainage to the
+grounded edges, not this scale-dependent screening; that approximation is safe
+for the spike whenever τ_screen(footprint) ≫ the spike duration, i.e. unless
+ρ_s·ε_r/d is ~50× smaller than the defaults.
+
+If a measured pad waveform shows no spike, the cause is usually the measurement
+chain rather than the chamber: (a) the pad–sheet coupling is ~31 pF/cm²
+(ε₀ε_r/d for 100 μm Kapton), so a large pad into 50 Ω gives a 15–50 ns input RC
+that attenuates a 1 ns spike ×15–50; (b) a digitizer sampling at 10 ns averages
+it down another ×10; (c) if the real coating's ρ_s is much lower than configured,
+τ_screen drops into the few-ns range and the sheet itself starts eating the
+spike; (d) the spike carries only a small fraction of the pad charge (wire
+screening), so after any of the above it sits below the noise floor.
+
 ---
 
 ## Gas file
