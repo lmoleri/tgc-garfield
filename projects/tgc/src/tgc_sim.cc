@@ -63,6 +63,8 @@
 #include "Garfield/DriftLineRKF.hh"
 #include "Garfield/FundamentalConstants.hh"
 #include "Garfield/MediumMagboltz.hh"
+#include "Garfield/Random.hh"
+#include "Garfield/RandomEngineRoot.hh"
 #include "Garfield/Sensor.hh"
 #include "nlohmann/json.hpp"
 
@@ -1317,8 +1319,16 @@ int main(int argc, char* argv[]) {
     const auto opts = ParseCli(argc, argv);
     Config cfg = LoadConfig(opts.configPath);
 
-    // Seed 0 → ROOT draws a fresh TUUID-based seed each run; >0 → reproducible.
-    gRandom->SetSeed(static_cast<UInt_t>(cfg.simulation.randomSeed));
+    // Seed 0 → a fresh TUUID-based seed each run; >0 → reproducible.
+    // Two independent generators must be seeded: ROOT's gRandom drives the
+    // source-position sampling here, while Garfield's avalanche/drift transport
+    // uses its own engine (TRandom3 inside RandomEngineRoot).  TRandom3::SetSeed(0)
+    // likewise self-seeds randomly, so seed 0 keeps both fully random.
+    const auto seed = static_cast<UInt_t>(cfg.simulation.randomSeed);
+    gRandom->SetSeed(seed);
+    Garfield::RandomEngineRoot rngEngine;
+    rngEngine.SetSeed(seed);
+    Garfield::Random::SetEngine(rngEngine);
 
     if (opts.singleDistanceMm)
       cfg.source.fixedDistMm = std::vector<double>{*opts.singleDistanceMm};
