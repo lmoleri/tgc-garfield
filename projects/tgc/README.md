@@ -13,7 +13,7 @@ desktop GUI or the command-line binary directly.
 ```
 projects/tgc/
 ├── src/
-│   └── tgc_sim.cc              ← simulation binary (C++20, ~1350 lines)
+│   └── tgc_sim.cc              ← simulation binary (C++20, ~1650 lines)
 ├── config/
 │   ├── default_tgc.json            ← production config
 │   ├── default_tgc_fast-current.json ← fast preset (short window, narrow E-grid)
@@ -572,7 +572,7 @@ Physics § 5. All keys are ignored when `enable = false`.
 | `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
 | `store_drift_lines`  | bool  | —    | true     | When `true`, `AvalancheMicroscopic` records every intermediate collision step in the primary electron drift line (not just start and end), producing denser 3D path data for the GUI 3D Tracks viewer at the cost of larger ROOT files |
 | `ion_max_step_um`    | float | μm   | 5.0      | Cap on the `DriftLineRKF` integration step.  The stepper's steps otherwise grow geometrically (×10 per step) and the induced current is sampled only at drift-line points, so an uncapped surface-born ion's ~10 μm step spans ~5–8 ns right where i(t) varies fastest — producing an artificial flat shelf with a sharp kink ~8 ns after the electron spike.  5 μm resolves the early ion signal to ~1–2 ns at roughly 5× the ion-drift CPU; `0` disables the cap |
-| `random_seed`        | int   | —    | 0        | Seed passed to ROOT's `gRandom->SetSeed`.  `0` (default) lets ROOT pick a fresh seed from a UUID each run, giving non-reproducible results.  Any positive integer fixes the seed so that the avalanche and source-position sequence are identical across runs — useful for bit-for-bit comparisons and debugging |
+| `random_seed`        | int   | —    | 0        | Seed for the random-number generators.  Seeds **both** ROOT's `gRandom` (which drives source-position sampling) and Garfield's own transport engine (the `TRandom3` behind `AvalancheMicroscopic` / `DriftLineRKF`, installed via `Garfield::Random::SetEngine`) — both are required for reproducibility, since Garfield does not draw from `gRandom`.  `0` (default) self-seeds both randomly each run; any positive integer fixes the avalanche, ion-drift, and source-position sequence so runs are bit-for-bit reproducible — useful for A/B comparisons and debugging |
 
 ---
 
