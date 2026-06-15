@@ -260,6 +260,51 @@ it down another ×10; (c) if the real coating's ρ_s is much lower than configur
 spike; (d) the spike carries only a small fraction of the pad charge (wire
 screening), so after any of the above it sits below the noise floor.
 
+### 5. Front-end electronics — fast current amplifier
+
+An **opt-in** model of the **CIVIDEC C2-TCT broadband current amplifier** can be
+applied to the two physical readout channels — the **anode** (wires) and the
+**cathode** (readout pad) — to produce the amplifier output voltage that a scope
+would record, for direct comparison with measured waveforms.  It is **off by
+default** (`amplifier.enable = false`), so a default run is byte-for-byte
+unchanged; the raw induced-current waveforms are always kept, and the amplifier
+output is written to **new** branches/profiles in mV.
+
+Datasheet parameters: current amplifier, gain **40 dB** (×100), analog bandwidth
+**10 kHz – 2 GHz**, input impedance **50 Ω**, AC-coupled input (**1 nF**),
+non-inverting bipolar, ±1 V linear output.  Per the hardware setup the **wire**
+input carries an **additional 470 pF capacitor in series**.
+
+The amplifier is linear and time-invariant, so its effect is a filter cascade on
+the per-bin induced current (note **i [fC/ns] ≡ i [µA]**, since fC/ns = 10⁻⁶ A):
+
+> V_out(t) [mV] = G · R_in · ( LP_{2 GHz} ∘ HP_{coupling} ∘ HP_{10 kHz} )[ i(t) ] · 10⁻³
+
+- **HP_coupling** — AC coupling from the series input capacitor and the 50 Ω input,
+  a one-pole high-pass with τ = R_in · C_series.  This is the element that
+  distinguishes the channels:
+  - cathode (pad): C = 1 nF → τ ≈ **50 ns**
+  - anode (wire): C = 470 pF ⊕ 1 nF = 320 pF → τ ≈ **16 ns** (faster baseline
+    restoration / more differentiation than the pad)
+- **HP_10 kHz** — the amplifier's intrinsic lower band edge, τ = 1/(2π·10 kHz) ≈
+  15.9 µs (a slow droop; negligible in short windows, visible in long ones).
+- **LP_2 GHz** — the upper band edge, τ = 1/(2π·2 GHz) ≈ 0.08 ns (smooths sub-ns
+  features; only matters at very fine `time_step_ns`).
+- **Scaling** — G = 10^(40/20) = 100 and R_in = 50 Ω give **V_out [mV] = 5 · i [fC/ns]**.
+
+A one-pole high-pass is exactly the recursion already used for the resistive
+relaxation (`i_out = i − (1/τ)·lowpass_τ(i)`); the low-pass is the standard
+`y[k] = b·y[k−1] + (1−b)·x[k]`, `b = e^{−Δt/τ}`.  The chain is applied to the
+post-relaxation pad current and the raw wire current (the electronics sit after
+the detector).  No noise term is included (the model is deterministic; the ~4 µA
+spike dwarfs the 0.4 µA rms input noise anyway).
+
+Note that this **fast** current amplifier **keeps the electron spike**: a high-pass
+passes fast signals and a 2 GHz roll-off does not smear a ~1 ns feature, so the
+amplifier output still shows the spike on both channels.  The absence of the spike
+in measured data therefore comes from elsewhere (input loading, grounding, the
+actual ρ_s) — see *Why the electron spike appears on the simulated cathode* above.
+
 ---
 
 ## Gas file
@@ -398,6 +443,9 @@ been built yet, the window opens with a warning in the title bar.
 │    (Thickness  100 μm)          │                                                       │
 │    (Resistivity 500 kΩ/sq)      │                                                       │
 │    (Delayed signal [✓])         │                                                       │
+│  ▼ Amplifier                    │                                                       │
+│    Enable        [ ]            │                                                       │
+│    (Gain [dB]    40 …)          │  ← rows enabled when Enable is checked                │
 │  ▼ Source                       │                                                       │
 │    Energy [keV]      5.9        │                                                       │
 │    Distance     [ Random]       │                                                       │
@@ -431,7 +479,7 @@ been built yet, the window opens with a warning in the title bar.
 | **Log** | Live stdout stream from `tgc_sim`, auto-scrolling |
 | **Summary** | Table from `summary.csv` — one row per source distance |
 | **Plots** | 2 × 3 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, ⟨Q_cathode_top⟩, charge ratio, and avalanche size vs source distance (with SEM error bars). Sixth cell empty |
-| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). Read directly from the ROOT file via uproot |
+| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). The **Amplifier output [mV]** checkbox switches the traces to the front-end amplifier output voltage (requires a file produced with `amplifier.enable = true`). Read directly from the ROOT file via uproot |
 | **Charge** | Cumulative charge integrals Q(t) — running integral of each waveform — for anode and cathode, per (distance, x-position) pair. An event slider selects individual events. ROOT TCanvas opens separately (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
@@ -471,6 +519,21 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
 | `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
+
+### `amplifier`
+
+Opt-in front-end model (CIVIDEC C2-TCT) applied to the anode and cathode waveforms; see
+Physics § 5. All keys are ignored when `enable = false`.
+
+| Key                    | Type   | Unit | Default      | Description |
+|------------------------|--------|------|--------------|-------------|
+| `enable`               | bool   | —    | `false`      | When `true`, produce the amplifier output voltage [mV] for the anode (wire) and cathode (pad) channels as the `anode_amp` / `cathode_amp` branches and `p_anode_amp` / `p_cathode_amp` profiles. When `false`, those outputs are zero and the run is byte-for-byte identical to one built without this feature |
+| `gain_db`              | float  | dB   | 40.0         | Voltage gain (40 dB = ×100). Sets the output scale V_out[mV] = 10^(gain_db/20)·R_in·i[µA]·10⁻³ |
+| `input_impedance_ohm`  | float  | Ω    | 50.0         | Amplifier input impedance. Sets the AC-coupling high-pass τ = R_in·C and the output scale |
+| `bandwidth_high_hz`    | float  | Hz   | 2.0e9        | Upper −3 dB band edge → input low-pass τ = 1/(2π·f). Smooths sub-ns features; only significant at very small `time_step_ns` |
+| `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | Lower −3 dB band edge → high-pass τ = 1/(2π·f) ≈ 15.9 µs. Slow baseline droop, visible only in long time windows |
+| `coupling_cap_nf`      | float  | nF   | 1.0          | AC-coupling capacitor at the input. With R_in sets the pad high-pass τ (1 nF, 50 Ω → 50 ns) |
+| `wire_series_cap_pf`   | float  | pF   | 470.0        | Extra series capacitor on the **anode (wire)** input only; in series with the coupling cap (470 pF ⊕ 1 nF = 320 pF) it gives the wire channel a shorter high-pass τ ≈ 16 ns |
 
 ### `source`
 
@@ -569,6 +632,8 @@ the literal `dist_rnd`.
 | `p_anode_ion`           | TProfile | Ion-only component of the anode current vs time [fC/ns] |
 | `p_cathode_electron`    | TProfile | Electron-only component of the cathode current vs time [fC/ns] |
 | `p_cathode_ion`         | TProfile | Ion-only component of the cathode current vs time [fC/ns] |
+| `p_anode_amp`           | TProfile | Mean anode amplifier output vs time [mV] (zero unless `amplifier.enable`) |
+| `p_cathode_amp`         | TProfile | Mean cathode amplifier output vs time [mV] (zero unless `amplifier.enable`) |
 
 **Summary graphs (in `summary/`):**
 
@@ -590,6 +655,7 @@ the literal `dist_rnd`.
 | `cathode` | vector\<float\> | Per-bin cathode current waveform [fC/ns] |
 | `anode_e` / `anode_i` | vector\<float\> | Electron / ion component of the anode current [fC/ns]; the two sum to `anode` bin-by-bin |
 | `cathode_e` / `cathode_i` | vector\<float\> | Electron / ion component of the cathode current [fC/ns]; the two sum to `cathode` |
+| `anode_amp` / `cathode_amp` | vector\<float\> | Amplifier output voltage [mV] for the anode (wire) and cathode (pad) channels; present in every file but zero unless `amplifier.enable` (see Physics § 5) |
 | `primary_x/y/z` | vector\<float\> | 3D points along the primary electron drift path [cm]. 2 points (start + end) when `store_drift_lines = false`; full collision-step trajectory when `true` |
 | `cloud_x/y/z` | vector\<float\> | Start positions of secondary (avalanche) electron tracks [cm], up to 500 points |
 | `ion_x/y/z` | vector\<float\> | Flattened ion drift paths [cm], up to 100 ions |

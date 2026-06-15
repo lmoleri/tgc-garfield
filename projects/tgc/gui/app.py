@@ -264,6 +264,47 @@ class ConfigPanel(QScrollArea):
         self._update_readout_widgets()
         self.readout_type.currentIndexChanged.connect(self._update_readout_widgets)
 
+        # ── Amplifier (CIVIDEC C2-TCT front end) ──────────────────────────
+        amp_box  = QGroupBox("Amplifier")
+        amp_form = QFormLayout(amp_box)
+
+        self.amp_enable = QCheckBox()
+        self.amp_enable.setChecked(False)
+        self.amp_enable.setToolTip(
+            "Apply the fast current-amplifier front end (CIVIDEC C2-TCT) to the\n"
+            "anode (wire) and cathode (pad) waveforms, producing the output voltage\n"
+            "[mV] as new branches. Off (default) leaves the run byte-for-byte\n"
+            "unchanged. The raw induced-current waveforms are always kept."
+        )
+
+        self.amp_gain      = self._dspin(0.0, 120.0, 1.0, 1, 40.0)
+        self.amp_gain.setToolTip("Voltage gain [dB] (40 dB = ×100)")
+        self.amp_zin       = self._dspin(1.0, 10000.0, 1.0, 1, 50.0)
+        self.amp_zin.setToolTip("Input impedance [Ω]")
+        self.amp_bw_high   = self._dspin(0.001, 100.0, 0.1, 3, 2.0)
+        self.amp_bw_high.setToolTip("Upper −3 dB bandwidth [GHz] → input low-pass τ = 1/(2π f)")
+        self.amp_bw_low    = self._dspin(0.001, 1e6, 1.0, 3, 10.0)
+        self.amp_bw_low.setToolTip("Lower −3 dB bandwidth [kHz] → high-pass τ = 1/(2π f)")
+        self.amp_coupling  = self._dspin(0.001, 1000.0, 0.1, 3, 1.0)
+        self.amp_coupling.setToolTip("AC-coupling capacitor at the input [nF]")
+        self.amp_wire_cap  = self._dspin(0.1, 100000.0, 10.0, 1, 470.0)
+        self.amp_wire_cap.setToolTip(
+            "Extra series capacitor on the anode (wire) input [pF]; in series with\n"
+            "the coupling cap it sets a shorter high-pass τ on the wire channel."
+        )
+
+        amp_form.addRow("Enable",                self.amp_enable)
+        amp_form.addRow("Gain [dB]",             self.amp_gain)
+        amp_form.addRow("Input impedance [Ω]",   self.amp_zin)
+        amp_form.addRow("Upper bandwidth [GHz]", self.amp_bw_high)
+        amp_form.addRow("Lower bandwidth [kHz]", self.amp_bw_low)
+        amp_form.addRow("Coupling cap [nF]",     self.amp_coupling)
+        amp_form.addRow("Wire series cap [pF]",  self.amp_wire_cap)
+        root_layout.addWidget(amp_box)
+
+        self._update_amplifier_widgets()
+        self.amp_enable.toggled.connect(self._update_amplifier_widgets)
+
         # ── Source ────────────────────────────────────────────────────────
         src_box  = QGroupBox("Source")
         src_form = QFormLayout(src_box)
@@ -580,6 +621,12 @@ class ConfigPanel(QScrollArea):
         self.resistive_layer_size.setEnabled(resistive)
         self.delayed_signal_cb.setEnabled(resistive)
 
+    def _update_amplifier_widgets(self):
+        on = self.amp_enable.isChecked()
+        for w in (self.amp_gain, self.amp_zin, self.amp_bw_high,
+                  self.amp_bw_low, self.amp_coupling, self.amp_wire_cap):
+            w.setEnabled(on)
+
     # ── file dialogs ─────────────────────────────────────────────────────
 
     def _browse_out_dir(self):
@@ -644,6 +691,15 @@ class ConfigPanel(QScrollArea):
                 "resistive_layer_size_cm":    self.resistive_layer_size.value(),
                 "enable_delayed_signal":      self.delayed_signal_cb.isChecked(),
             },
+            "amplifier": {
+                "enable":              self.amp_enable.isChecked(),
+                "gain_db":             self.amp_gain.value(),
+                "input_impedance_ohm": self.amp_zin.value(),
+                "bandwidth_high_hz":   self.amp_bw_high.value() * 1e9,   # GHz → Hz
+                "bandwidth_low_hz":    self.amp_bw_low.value() * 1e3,    # kHz → Hz
+                "coupling_cap_nf":     self.amp_coupling.value(),
+                "wire_series_cap_pf":  self.amp_wire_cap.value(),
+            },
             "source": {
                 "energy_keV":          self.energy_kev.value(),
                 "source_distances_mm": dists,
@@ -701,6 +757,16 @@ class ConfigPanel(QScrollArea):
         self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
         self.resistive_layer_size.setValue(ro.get("resistive_layer_size_cm", 20.0))
         self.delayed_signal_cb.setChecked(ro.get("enable_delayed_signal", True))
+
+        amp = d.get("amplifier", {})
+        self.amp_enable.setChecked(bool(amp.get("enable", False)))
+        self.amp_gain.setValue(    amp.get("gain_db", 40.0))
+        self.amp_zin.setValue(     amp.get("input_impedance_ohm", 50.0))
+        self.amp_bw_high.setValue( amp.get("bandwidth_high_hz", 2e9) / 1e9)   # Hz → GHz
+        self.amp_bw_low.setValue(  amp.get("bandwidth_low_hz", 1e4) / 1e3)    # Hz → kHz
+        self.amp_coupling.setValue(amp.get("coupling_cap_nf", 1.0))
+        self.amp_wire_cap.setValue(amp.get("wire_series_cap_pf", 470.0))
+        self._update_amplifier_widgets()
 
         s = d.get("source", {})
         self.energy_kev.setValue(s.get("energy_keV", 5.9))
@@ -863,6 +929,11 @@ class ResultsPanel(QTabWidget):
             "Overlay the electron and ion contributions to the induced current\n"
             "(requires a ROOT file produced with the component-split branches).")
         sel_h.addWidget(self.wave_split_cb)
+        self.wave_amp_cb = QCheckBox("Amplifier output [mV]")
+        self.wave_amp_cb.setToolTip(
+            "Plot the amplifier output voltage [mV] instead of the induced current\n"
+            "(requires a ROOT file produced with amplifier.enable = true).")
+        sel_h.addWidget(self.wave_amp_cb)
         wave_layout.addWidget(sel_row)
 
         # — per-event info —
@@ -891,6 +962,7 @@ class ResultsPanel(QTabWidget):
         self.wave_xpos_combo.currentIndexChanged.connect(self._on_wave_xpos_changed)
         self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
         self.wave_split_cb.toggled.connect(self._update_waveform_plot)
+        self.wave_amp_cb.toggled.connect(self._update_waveform_plot)
 
         self.addTab(wave_widget, "Waveforms")
 
@@ -1594,6 +1666,12 @@ class ResultsPanel(QTabWidget):
                             for br in ("anode_e", "anode_i",
                                        "cathode_e", "cathode_i"):
                                 data[br] = np.stack(tree[br].array(library="np"))
+                        # Amplifier-output branches + mean profiles (amplifier runs only)
+                        if "anode_amp" in tree.keys():
+                            for br in ("anode_amp", "cathode_amp"):
+                                data[br] = np.stack(tree[br].array(library="np"))
+                            data["mean_a_amp"] = f[f"{key}/p_anode_amp"].values()
+                            data["mean_c_amp"] = f[f"{key}/p_cathode_amp"].values()
                         self._waveform_data.setdefault(dist_label, {})[xpos_label] = data
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
@@ -1736,15 +1814,42 @@ class ResultsPanel(QTabWidget):
         self.wave_event_label.setText(f"{evt_idx + 1} / {n}")
 
         times   = data["times"].astype("f8")
-        anode   = data["anode"][evt_idx].astype("f8")
-        cathode = data["cathode"][evt_idx].astype("f8")
-        mean_a  = data["mean_a"].astype("f8")
-        mean_c  = data["mean_c"].astype("f8")
         nbins   = len(times)
         dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
 
-        # Optional e⁻/ion component overlay
-        split = self.wave_split_cb.isChecked()
+        # Charge labels are event properties — always from the raw induced current.
+        qa    = float(-np.sum(data["anode"][evt_idx].astype("f8"))   * dt)
+        qc    = float( np.sum(data["cathode"][evt_idx].astype("f8")) * dt)
+        ratio = qc / qa if qa != 0 else float("nan")
+        self.wave_qa_lbl.setText(f"{qa:.4g}")
+        self.wave_qc_lbl.setText(f"{qc:.4g}")
+        self.wave_ratio_lbl.setText(f"{ratio:.4g}")
+
+        # Amplifier-output mode: plot V [mV] instead of the induced current.
+        amp_mode = self.wave_amp_cb.isChecked()
+        if amp_mode and "anode_amp" not in data:
+            if not getattr(self, "_warned_no_amp", False):
+                self.append_log(
+                    "[GUI] This ROOT file has no amplifier-output branches "
+                    "(run with amplifier.enable = true) — toggle ignored.")
+                self._warned_no_amp = True
+            amp_mode = False
+
+        if amp_mode:
+            anode   = data["anode_amp"][evt_idx].astype("f8")
+            cathode = data["cathode_amp"][evt_idx].astype("f8")
+            mean_a  = data["mean_a_amp"].astype("f8")
+            mean_c  = data["mean_c_amp"].astype("f8")
+            units   = "V [mV]"
+        else:
+            anode   = data["anode"][evt_idx].astype("f8")
+            cathode = data["cathode"][evt_idx].astype("f8")
+            mean_a  = data["mean_a"].astype("f8")
+            mean_c  = data["mean_c"].astype("f8")
+            units   = "i [fC/ns]"
+
+        # Optional e⁻/ion component overlay (current mode only)
+        split = self.wave_split_cb.isChecked() and not amp_mode
         if split and "anode_e" not in data:
             if not getattr(self, "_warned_no_split", False):
                 self.append_log(
@@ -1756,14 +1861,6 @@ class ResultsPanel(QTabWidget):
         anode_i   = data["anode_i"][evt_idx].astype("f8")   if split else None
         cathode_e = data["cathode_e"][evt_idx].astype("f8") if split else None
         cathode_i = data["cathode_i"][evt_idx].astype("f8") if split else None
-
-        qa    = float(-np.sum(anode)   * dt)
-        qc    = float( np.sum(cathode) * dt)
-        ratio = qc / qa if qa != 0 else float("nan")
-
-        self.wave_qa_lbl.setText(f"{qa:.4g}")
-        self.wave_qc_lbl.setText(f"{qc:.4g}")
-        self.wave_ratio_lbl.setText(f"{ratio:.4g}")
 
         try:
             import ROOT  # noqa: PLC0415
@@ -1789,7 +1886,7 @@ class ResultsPanel(QTabWidget):
                 ga = ROOT.TGraph(nbins, times, y_evt)
                 ga.SetTitle(
                     f"{signal_name} - {label}, event {evt_idx + 1};"
-                    f"Time [ns];i [fC/ns]"
+                    f"Time [ns];{units}"
                 )
                 ga.SetLineColor(line_color)
                 ga.SetLineWidth(2)

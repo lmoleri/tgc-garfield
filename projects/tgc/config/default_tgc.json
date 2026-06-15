@@ -15,6 +15,15 @@
     "resistive_layer_size_cm": 20.0,
     "enable_delayed_signal": true
   },
+  "amplifier": {
+    "enable": false,
+    "gain_db": 40.0,
+    "input_impedance_ohm": 50.0,
+    "bandwidth_high_hz": 2000000000.0,
+    "bandwidth_low_hz": 10000.0,
+    "coupling_cap_nf": 1.0,
+    "wire_series_cap_pf": 470.0
+  },
   "source": {
     "energy_keV": 5.6,
     "source_distances_mm": [

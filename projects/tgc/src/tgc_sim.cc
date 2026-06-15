@@ -102,6 +102,20 @@ struct ReadoutConfig {
   bool        enableDelayedSignal     = true;  // if false, skip SetDelayedWeightingPotential
 };
 
+// Front-end electronics: the CIVIDEC C2-TCT broadband current amplifier.
+// Opt-in (default off) post-processing model applied to the induced current of
+// the two physically read-out electrodes (anode wires + cathode pad), producing
+// the amplifier output voltage [mV].  Datasheet values are the defaults.
+struct AmplifierConfig {
+  bool   enable            = false;   // off → run is byte-for-byte unchanged
+  double gainDb            = 40.0;    // voltage gain [dB] (40 dB = ×100)
+  double inputImpedanceOhm = 50.0;    // input impedance [Ω]
+  double bandwidthHighHz   = 2.0e9;   // upper −3 dB edge → low-pass τ = 1/(2π f)
+  double bandwidthLowHz    = 1.0e4;   // lower −3 dB edge → high-pass τ = 1/(2π f)
+  double couplingCapNf     = 1.0;     // AC-coupling capacitor at the input [nF]
+  double wireSeriesCapPf   = 470.0;   // extra series cap on the anode (wire) input [pF]
+};
+
 struct SourceConfig {
   double energyKeV                                          = 5.9;
   std::optional<std::vector<double>> fixedDistMm            =       // nullopt → uniform random over gap
@@ -148,6 +162,7 @@ constexpr std::size_t kMaxDispCloudPts = 500;  // avalanche-cloud points saved p
 struct Config {
   GeometryConfig   geometry;
   ReadoutConfig    readout;
+  AmplifierConfig  amplifier;
   SourceConfig     source;
   GasConfig        gas;
   SimulationConfig simulation;
@@ -421,6 +436,16 @@ Config LoadConfig(const fs::path& path) {
                                                       cfg.readout.enableDelayedSignal);
   }
 
+  if (const auto* a = FindSection(root, "amplifier")) {
+    cfg.amplifier.enable            = ReadBool  (*a, "amplifier", "enable",             cfg.amplifier.enable);
+    cfg.amplifier.gainDb            = ReadDouble(*a, "amplifier", "gain_db",            cfg.amplifier.gainDb);
+    cfg.amplifier.inputImpedanceOhm = ReadDouble(*a, "amplifier", "input_impedance_ohm", cfg.amplifier.inputImpedanceOhm);
+    cfg.amplifier.bandwidthHighHz   = ReadDouble(*a, "amplifier", "bandwidth_high_hz",  cfg.amplifier.bandwidthHighHz);
+    cfg.amplifier.bandwidthLowHz    = ReadDouble(*a, "amplifier", "bandwidth_low_hz",   cfg.amplifier.bandwidthLowHz);
+    cfg.amplifier.couplingCapNf     = ReadDouble(*a, "amplifier", "coupling_cap_nf",    cfg.amplifier.couplingCapNf);
+    cfg.amplifier.wireSeriesCapPf   = ReadDouble(*a, "amplifier", "wire_series_cap_pf", cfg.amplifier.wireSeriesCapPf);
+  }
+
   if (const auto* s = FindSection(root, "source")) {
     cfg.source.energyKeV    = ReadDouble(*s, "source", "energy_keV", cfg.source.energyKeV);
     {
@@ -483,6 +508,21 @@ Config LoadConfig(const fs::path& path) {
       throw std::runtime_error("readout.surface_resistivity_ohm_sq must be positive");
     if (cfg.readout.resistiveLayerSizeCm <= 0.)
       throw std::runtime_error("readout.resistive_layer_size_cm must be positive");
+  }
+
+  if (cfg.amplifier.enable) {
+    if (cfg.amplifier.inputImpedanceOhm <= 0.)
+      throw std::runtime_error("amplifier.input_impedance_ohm must be positive");
+    if (cfg.amplifier.bandwidthHighHz <= 0.)
+      throw std::runtime_error("amplifier.bandwidth_high_hz must be positive");
+    if (cfg.amplifier.bandwidthLowHz <= 0.)
+      throw std::runtime_error("amplifier.bandwidth_low_hz must be positive");
+    if (cfg.amplifier.bandwidthLowHz >= cfg.amplifier.bandwidthHighHz)
+      throw std::runtime_error("amplifier.bandwidth_low_hz must be below bandwidth_high_hz");
+    if (cfg.amplifier.couplingCapNf <= 0.)
+      throw std::runtime_error("amplifier.coupling_cap_nf must be positive");
+    if (cfg.amplifier.wireSeriesCapPf <= 0.)
+      throw std::runtime_error("amplifier.wire_series_cap_pf must be positive");
   }
 
   if (cfg.geometry.wirePitchCm <= 0.)  throw std::runtime_error("geometry.wire_pitch_cm must be positive");
@@ -710,23 +750,84 @@ void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
             << "\n";
 }
 
-// Apply the resistive-layer relaxation to a binned prompt pad current:
+// One-pole RC high-pass applied in place to a binned signal:
 //
-//   i_out(t) = i_p(t) − (1/τ) ∫₀^t i_p(t′) e^{−(t−t′)/τ} dt′
+//   y(t) = x(t) − (1/τ) ∫₀^t x(t′) e^{−(t−t′)/τ} dt′
 //
-// Exactly equivalent to evolving the separable delayed weighting potential
-// W(x,t) = W_s(x)·e^{−t/τ} per drift step (the time-dependent Ramo theorem for
-// resistive elements), but O(nBins) per event instead of ~200 weighting-potential
-// evaluations plus a bin-spreading loop per drift step.  The recursion is exact
-// for piecewise-constant i_p within a bin.
-void ApplyResistiveRelaxation(std::vector<double>& i, const double dtNs,
-                              const double tauNs) {
+// i.e. the signal minus its own exponential moving average (a CR differentiator
+// / AC coupling with time constant τ).  O(nBins); the recursion is exact for a
+// signal that is piecewise-constant within a bin.  No-op for τ ≤ 0.
+void ApplyOnePoleHighPass(std::vector<double>& x, const double dtNs,
+                          const double tauNs) {
+  if (tauNs <= 0.) return;
   const double a = std::exp(-dtNs / tauNs);
-  double conv = 0.;  // ∫₀^t e^{−(t−t′)/τ} i_p(t′) dt′, updated recursively
-  for (auto& s : i) {
+  double conv = 0.;  // ∫₀^t e^{−(t−t′)/τ} x(t′) dt′, updated recursively
+  for (auto& s : x) {
     conv = conv * a + s * tauNs * (1. - a);
     s -= conv / tauNs;
   }
+}
+
+// One-pole RC low-pass applied in place: y[k] = b·y[k−1] + (1−b)·x[k],
+// b = e^{−Δt/τ}.  No-op for τ ≤ 0.
+void ApplyOnePoleLowPass(std::vector<double>& x, const double dtNs,
+                         const double tauNs) {
+  if (tauNs <= 0.) return;
+  const double b = std::exp(-dtNs / tauNs);
+  double y = 0.;
+  for (auto& s : x) { y = b * y + (1. - b) * s; s = y; }
+}
+
+// The resistive-layer relaxation is exactly a one-pole high-pass with τ equal to
+// the surface-potential relaxation time.  Evolving the separable delayed
+// weighting potential W(x,t) = W_s(x)·e^{−t/τ} per drift step (the time-dependent
+// Ramo theorem for resistive elements) reduces to this single O(nBins) pass.
+void ApplyResistiveRelaxation(std::vector<double>& i, const double dtNs,
+                              const double tauNs) {
+  ApplyOnePoleHighPass(i, dtNs, tauNs);
+}
+
+// Derived parameters of the CIVIDEC C2-TCT amplifier model.  All time constants
+// in ns; the per-channel high-pass τ = R_in·C_series distinguishes the wire
+// input (extra 470 pF series cap) from the pad input (1 nF coupling only).
+struct AmplifierParams {
+  double tauHpAnodeNs;    // R_in · (couplingCap ⊕ wireSeriesCap)  [wire AC coupling]
+  double tauHpCathodeNs;  // R_in · couplingCap                    [pad AC coupling]
+  double tauHpLowNs;      // 1/(2π f_low)   — intrinsic lower band edge
+  double tauLpHighNs;     // 1/(2π f_high)  — intrinsic upper band edge
+  double mvPerFcPerNs;    // output scale: V_out[mV] = gain·R_in·i[µA]·1e-3
+};
+
+AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp) {
+  const double gain  = std::pow(10., amp.gainDb / 20.);   // dB → linear voltage gain
+  const double R     = amp.inputImpedanceOhm;
+  const double cCpF  = amp.couplingCapNf * 1e3;           // nF → pF
+  // Wire input: extra series cap in series with the coupling cap (1/C = Σ 1/Cᵢ).
+  const double cWpF  = (cCpF * amp.wireSeriesCapPf) / (cCpF + amp.wireSeriesCapPf);
+  // τ[ns] = R[Ω]·C[F]·1e9 = R[Ω]·C[pF]·1e-3.
+  const double tauHpCathodeNs = R * cCpF * 1e-3;
+  const double tauHpAnodeNs   = R * cWpF * 1e-3;
+  const double tauHpLowNs     = 1e9 / (2. * M_PI * amp.bandwidthLowHz);
+  const double tauLpHighNs    = 1e9 / (2. * M_PI * amp.bandwidthHighHz);
+  // i[fC/ns] ≡ i[µA]; V = gain·R·i[µA] in µV → ×1e-3 for mV.
+  const double mvPerFcPerNs   = gain * R * 1e-3;
+  return {tauHpAnodeNs, tauHpCathodeNs, tauHpLowNs, tauLpHighNs, mvPerFcPerNs};
+}
+
+// Pass a binned induced current i [fC/ns ≡ µA] through the amplifier chain and
+// return the output voltage [mV].  The amplifier is linear and time-invariant, so
+// the filter order is irrelevant: upper-bandwidth low-pass, the channel's
+// AC-coupling high-pass (tauHpNs), the intrinsic lower-bandwidth high-pass, then
+// the gain·R_in scaling.
+std::vector<double> AmplifierOutputMv(const std::vector<double>& iFcNs,
+                                      const double dtNs, const double tauHpNs,
+                                      const AmplifierParams& amp) {
+  std::vector<double> v(iFcNs);
+  ApplyOnePoleLowPass (v, dtNs, amp.tauLpHighNs);
+  ApplyOnePoleHighPass(v, dtNs, tauHpNs);
+  ApplyOnePoleHighPass(v, dtNs, amp.tauHpLowNs);
+  for (auto& s : v) s *= amp.mvPerFcPerNs;
+  return v;
 }
 
 void SetupSensor(Sensor& sensor, ComponentAnalyticField& cmp,
@@ -813,11 +914,20 @@ DistanceSummary RunDistancePoint(const Config& cfg,
                        "Mean cathode ion signal;t [ns];#LTi_{cathode,ion}#GT [fC/ns]",
                        static_cast<int>(nBins), 0., sim.timeWindowNs);
 
+  // Amplifier output voltage [mV] (filled only when amplifier.enable).
+  TProfile pAnodeAmp("p_anode_amp",
+                     "Mean anode amplifier output;t [ns];#LTV_{anode}#GT [mV]",
+                     static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pCathodeAmp("p_cathode_amp",
+                       "Mean cathode amplifier output;t [ns];#LTV_{cathode}#GT [mV]",
+                       static_cast<int>(nBins), 0., sim.timeWindowNs);
+
   for (TH1* h : std::initializer_list<TH1*>{
            &hAnodeQ, &hCathodeQ, &hCathodeTopQ, &hRatio,
            &hNprimary, &hAvalSize,
            &pAnodeSignal, &pCathodeSignal, &pCathodeTopSignal,
-           &pAnodeElec, &pAnodeIon, &pCathodeElec, &pCathodeIon}) {
+           &pAnodeElec, &pAnodeIon, &pCathodeElec, &pCathodeIon,
+           &pAnodeAmp, &pCathodeAmp}) {
     h->SetDirectory(nullptr);
   }
 
@@ -827,14 +937,19 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
   std::vector<float> anodeSigE(nBins, 0.f), anodeSigI(nBins, 0.f);
   std::vector<float> cathodeSigE(nBins, 0.f), cathodeSigI(nBins, 0.f);
+  // Amplifier output [mV]; left zero when amplifier.enable is false.
+  std::vector<float> anodeAmp(nBins, 0.f), cathodeAmp(nBins, 0.f);
   // Per-bin readout buffers; in resistive mode the pad ("cathode") buffers get
   // the relaxation filter applied before any output is filled from them.
   std::vector<double> bufA(nBins), bufC(nBins), bufT(nBins);
   std::vector<double> bufAe(nBins), bufAi(nBins), bufCe(nBins), bufCi(nBins);
+  std::vector<double> bufAamp, bufCamp;  // amplifier output, computed per event
   const bool resistiveRelax = cfg.readout.type == "resistive" &&
                               cfg.readout.enableDelayedSignal;
   const double relaxTauNs = resistiveRelax
       ? ComputeResistiveParams(cfg.readout, cfg.geometry).tauNs : 0.;
+  const bool amplify = cfg.amplifier.enable;
+  const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier);
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
   signalTree.Branch("event",             &evtId, "event/I");
@@ -846,6 +961,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   signalTree.Branch("anode_i",   &anodeSigI);
   signalTree.Branch("cathode_e", &cathodeSigE);
   signalTree.Branch("cathode_i", &cathodeSigI);
+  signalTree.Branch("anode_amp",   &anodeAmp);
+  signalTree.Branch("cathode_amp", &cathodeAmp);
 
   // ── 3D track branches ────────────────────────────────────────────────────────
   // primary_x/y/z : points along the primary electron drift line (≥ 2 always;
@@ -1046,6 +1163,13 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       ApplyResistiveRelaxation(bufCi, sim.timeStepNs, relaxTauNs);
     }
 
+    if (amplify) {
+      // Front-end amplifier acts on the current that reaches it: the raw wire
+      // current and the post-relaxation pad current.  Output is voltage [mV].
+      bufAamp = AmplifierOutputMv(bufA, sim.timeStepNs, ampPar.tauHpAnodeNs,   ampPar);
+      bufCamp = AmplifierOutputMv(bufC, sim.timeStepNs, ampPar.tauHpCathodeNs, ampPar);
+    }
+
     double rawAnode = 0., rawCathode = 0., rawCathodeTop = 0.;
     for (std::size_t k = 0; k < nBins; ++k) {
       rawAnode      += bufA[k];
@@ -1065,6 +1189,12 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       anodeSigI[k]   = static_cast<float>(bufAi[k] * nPrimary);
       cathodeSigE[k] = static_cast<float>(bufCe[k] * nPrimary);
       cathodeSigI[k] = static_cast<float>(bufCi[k] * nPrimary);
+      if (amplify) {
+        anodeAmp[k]   = static_cast<float>(bufAamp[k] * nPrimary);
+        cathodeAmp[k] = static_cast<float>(bufCamp[k] * nPrimary);
+        pAnodeAmp.Fill(t,   bufAamp[k] * nPrimary);
+        pCathodeAmp.Fill(t, bufCamp[k] * nPrimary);
+      }
     }
 
     const double qAnode      = -rawAnode      * sim.timeStepNs * nPrimary; // [fC]
@@ -1112,6 +1242,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     pAnodeIon.Write("p_anode_ion");
     pCathodeElec.Write("p_cathode_electron");
     pCathodeIon.Write("p_cathode_ion");
+    pAnodeAmp.Write("p_anode_amp");
+    pCathodeAmp.Write("p_cathode_amp");
     signalTree.Write("t_signals");
   }
 
@@ -1263,6 +1395,15 @@ json ConfigToJson(const Config& cfg) {
       {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq},
       {"enable_delayed_signal",      cfg.readout.enableDelayedSignal}
     }},
+    {"amplifier", {
+      {"enable",              cfg.amplifier.enable},
+      {"gain_db",             cfg.amplifier.gainDb},
+      {"input_impedance_ohm", cfg.amplifier.inputImpedanceOhm},
+      {"bandwidth_high_hz",   cfg.amplifier.bandwidthHighHz},
+      {"bandwidth_low_hz",    cfg.amplifier.bandwidthLowHz},
+      {"coupling_cap_nf",     cfg.amplifier.couplingCapNf},
+      {"wire_series_cap_pf",  cfg.amplifier.wireSeriesCapPf}
+    }},
     {"source", jSrc},
     {"gas", {
       {"gas1",                   cfg.gas.gas1},
@@ -1407,6 +1548,17 @@ int main(int argc, char* argv[]) {
     if (cfg.readout.type == "resistive") {
       std::cout << "\nSetting up resistive readout...\n";
       SetupResistiveReadout(cmpReadout, cmp, cfg.readout, cfg.geometry);
+    }
+
+    if (cfg.amplifier.enable) {
+      const AmplifierParams ap = ComputeAmplifierParams(cfg.amplifier);
+      std::cout << "  Amplifier: " << cfg.amplifier.gainDb << " dB, "
+                << cfg.amplifier.bandwidthLowHz / 1e3 << " kHz – "
+                << cfg.amplifier.bandwidthHighHz / 1e9 << " GHz, "
+                << cfg.amplifier.inputImpedanceOhm << " Ω in; AC-coupling τ: wire "
+                << ap.tauHpAnodeNs << " ns (+" << cfg.amplifier.wireSeriesCapPf
+                << " pF), pad " << ap.tauHpCathodeNs << " ns; output "
+                << ap.mvPerFcPerNs << " mV per fC/ns\n";
     }
 
     Sensor sensor;
