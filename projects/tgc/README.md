@@ -482,6 +482,7 @@ been built yet, the window opens with a warning in the title bar.
 | **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). The **Amplifier output [mV]** checkbox switches the traces to the front-end amplifier output voltage (requires a file produced with `amplifier.enable = true`). Read directly from the ROOT file via uproot |
 | **Charge** | Cumulative charge integrals Q(t) — running integral of each waveform — for anode and cathode, per (distance, x-position) pair. An event slider selects individual events. ROOT TCanvas opens separately (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
+| **Weighting Field** | Exact Shockley–Ramo weighting field/potential of a selected electrode (`anode`, `cathode`, `cathode_top`), computed with Garfield's `ComponentAnalyticField` — the same geometry the simulation uses, so the wire screening is faithful. Quantity selectable (W potential, \|E_w\|, E_w,x, E_w,y); XY colour map plus X/Y profile slices. Interactive from the geometry spinboxes — no simulation run needed. The resistive-mode α scaling and exp(−t/τ) relaxation are *not* applied (α is a constant ≈0.98). Requires PyROOT **and** a loadable Garfield library |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
 | **Magboltz** | Gas transport-property viewer: reads the `_props.csv` sidecar file exported automatically alongside the `.gas` file. Displays electron drift velocity, Townsend α, attachment η, longitudinal and transverse diffusion coefficients, effective gain (α − η), ion drift velocity, and ion mobility as a function of E-field — all in one ROOT TCanvas (8 panels). Export buttons save the plots to a ROOT file or copy the CSV. Requires PyROOT |
 
@@ -489,9 +490,11 @@ been built yet, the window opens with a warning in the title bar.
 responsive).  **■ Stop** sends SIGTERM.  **Load Config** / **Save Config** read and
 write `.json` files that are fully compatible with the CLI `--config` flag.
 
-> **Note:** The E-Field, 3D Tracks, and Magboltz tabs open ROOT TCanvas windows and require
-> PyROOT (ROOT importable from Python — available automatically when using the
-> conda ROOT installation described in the Build section above).
+> **Note:** The E-Field, Weighting Field, 3D Tracks, and Magboltz tabs open ROOT TCanvas
+> windows and require PyROOT (ROOT importable from Python — available automatically when
+> using the conda ROOT installation described in the Build section above). The Weighting
+> Field tab additionally loads the Garfield shared library into the process; if it cannot
+> be found the tab logs a message and is disabled (the rest of the GUI is unaffected).
 
 ---
 
@@ -711,6 +714,7 @@ currently-rendered ROOT TCanvas objects, one per tab, keyed as follows:
 | `tracks_3d` | 3D Tracks  | 3D drift-line and geometry view |
 | `magboltz`  | Magboltz   | Gas transport-coefficient panels |
 | `efield`    | E-Field    | 2D electric-field maps |
+| `wfield`    | Weighting Field | Per-electrode weighting field/potential maps |
 
 Only keys for canvases that were open and alive at run completion are written.
 The file is omitted (and a warning logged) if PyROOT is unavailable.

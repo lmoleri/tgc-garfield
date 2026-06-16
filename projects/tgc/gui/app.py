@@ -896,6 +896,11 @@ class ResultsPanel(QTabWidget):
         self._efield_cache: dict | None = None   # {x, y, Ex, Ey} computed arrays
         self._efield_root_canvas  = None   # ROOT TCanvas for E-field maps
         self._efield_objects: list = []
+        self._wfield_cache: dict | None = None   # {x, y, W, Wx, Wy, electrode} arrays
+        self._wfield_root_canvas  = None   # ROOT TCanvas for weighting-field maps
+        self._wfield_objects: list = []
+        self._garfield = None              # cached ROOT.Garfield once libs are loaded
+        self._garfield_failed = False      # don't retry the load after a failure
 
         wave_widget = QWidget()
         wave_layout = QVBoxLayout(wave_widget)
@@ -1219,6 +1224,126 @@ class ResultsPanel(QTabWidget):
             lambda: self._update_efield_plots(recompute=False))
 
         self.addTab(efield_widget, "E-Field")
+
+        # ── Weighting Field tab ───────────────────────────────────────────────
+        wfield_widget = QWidget()
+        wfield_layout = QVBoxLayout(wfield_widget)
+        wfield_layout.setContentsMargins(8, 6, 8, 6)
+        wfield_layout.setSpacing(6)
+
+        # — row 1: geometry inputs (wire voltage is irrelevant to a weighting field) —
+        wgeom_row = QWidget()
+        wgeom_h   = QHBoxLayout(wgeom_row)
+        wgeom_h.setContentsMargins(0, 0, 0, 0)
+
+        def _add_wgeom_spin(label, widget):
+            wgeom_h.addWidget(QLabel(label))
+            wgeom_h.addWidget(widget)
+            wgeom_h.addSpacing(8)
+
+        self.wf_gap       = QDoubleSpinBox()
+        self.wf_gap.setRange(0.01, 5.0);  self.wf_gap.setSingleStep(0.01)
+        self.wf_gap.setDecimals(3);       self.wf_gap.setValue(0.14)
+        self.wf_pitch     = QDoubleSpinBox()
+        self.wf_pitch.setRange(0.01, 5.0); self.wf_pitch.setSingleStep(0.01)
+        self.wf_pitch.setDecimals(3);      self.wf_pitch.setValue(0.18)
+        self.wf_n_wires   = QSpinBox()
+        self.wf_n_wires.setRange(2, 200);  self.wf_n_wires.setValue(10)
+        self.wf_wire_diam = QDoubleSpinBox()
+        self.wf_wire_diam.setRange(1.0, 1000.0); self.wf_wire_diam.setSingleStep(1.0)
+        self.wf_wire_diam.setDecimals(1);         self.wf_wire_diam.setValue(50.0)
+
+        _add_wgeom_spin("Gap [cm]:",       self.wf_gap)
+        _add_wgeom_spin("Pitch [cm]:",     self.wf_pitch)
+        _add_wgeom_spin("N wires:",        self.wf_n_wires)
+        _add_wgeom_spin("Wire diam [µm]:", self.wf_wire_diam)
+        wgeom_h.addStretch()
+        wfield_layout.addWidget(wgeom_row)
+
+        # — row 2: electrode + quantity + slice depths + colormap + binning + compute —
+        wctrl_row = QWidget()
+        wctrl_h   = QHBoxLayout(wctrl_row)
+        wctrl_h.setContentsMargins(0, 0, 0, 0)
+
+        wctrl_h.addWidget(QLabel("Electrode:"))
+        self.wf_electrode = QComboBox()
+        self.wf_electrode.addItems(["cathode", "anode", "cathode_top"])
+        wctrl_h.addWidget(self.wf_electrode)
+        wctrl_h.addSpacing(8)
+
+        wctrl_h.addWidget(QLabel("Quantity:"))
+        self.wf_quantity = QComboBox()
+        self.wf_quantity.addItems(["W (potential)", "|E_w|", "E_w,x", "E_w,y"])
+        wctrl_h.addWidget(self.wf_quantity)
+        wctrl_h.addSpacing(12)
+
+        wctrl_h.addWidget(QLabel("at y [cm]:"))
+        self.wf_y_depth = QDoubleSpinBox()
+        self.wf_y_depth.setRange(-0.14, 0.14); self.wf_y_depth.setSingleStep(0.01)
+        self.wf_y_depth.setDecimals(3);        self.wf_y_depth.setValue(0.0)
+        wctrl_h.addWidget(self.wf_y_depth)
+        wctrl_h.addSpacing(8)
+
+        wctrl_h.addWidget(QLabel("at x [cm]:"))
+        self.wf_x_depth = QDoubleSpinBox()
+        self.wf_x_depth.setRange(-1.0, 1.0);  self.wf_x_depth.setSingleStep(0.01)
+        self.wf_x_depth.setDecimals(3);        self.wf_x_depth.setValue(0.0)
+        wctrl_h.addWidget(self.wf_x_depth)
+        wctrl_h.addSpacing(12)
+
+        wctrl_h.addWidget(QLabel("Colormap:"))
+        self.wf_cmap = QComboBox()
+        self.wf_cmap.addItems(["viridis", "plasma", "hot_r", "RdBu_r"])
+        wctrl_h.addWidget(self.wf_cmap)
+        wctrl_h.addSpacing(12)
+
+        wctrl_h.addWidget(QLabel("Grid nx:"))
+        self.wf_nx = QSpinBox()
+        self.wf_nx.setRange(50, 2000)
+        self.wf_nx.setSingleStep(50)
+        self.wf_nx.setValue(200)
+        wctrl_h.addWidget(self.wf_nx)
+        wctrl_h.addSpacing(6)
+        wctrl_h.addWidget(QLabel("ny:"))
+        self.wf_ny = QSpinBox()
+        self.wf_ny.setRange(50, 2000)
+        self.wf_ny.setSingleStep(50)
+        self.wf_ny.setValue(120)
+        wctrl_h.addWidget(self.wf_ny)
+        wctrl_h.addSpacing(12)
+
+        wf_compute_btn = QPushButton("Compute")
+        wf_compute_btn.clicked.connect(lambda: self._update_wfield_plots(recompute=True))
+        wctrl_h.addWidget(wf_compute_btn)
+        wctrl_h.addStretch()
+        wfield_layout.addWidget(wctrl_row)
+
+        wf_hint = QLabel(
+            "Exact Shockley–Ramo weighting field of the selected electrode, computed "
+            "with Garfield's ComponentAnalyticField (the same geometry the simulation "
+            "uses — note the wire screening). Per-electrode: 1 V on that electrode, 0 V "
+            "on all others.\n"
+            "In resistive mode the cathode field is further scaled by a constant α≈0.98 "
+            "and relaxes as exp(−t/τ); that scaling is not applied here."
+        )
+        wf_hint.setWordWrap(True)
+        wf_hint.setStyleSheet("color: grey; font-size: 11px;")
+        wfield_layout.addWidget(wf_hint)
+        wfield_layout.addStretch()
+
+        # Electrode change needs a recompute (different field); the rest only re-slice/redraw.
+        self.wf_electrode.currentIndexChanged.connect(
+            lambda: self._update_wfield_plots(recompute=True))
+        self.wf_quantity.currentIndexChanged.connect(
+            lambda: self._update_wfield_plots(recompute=False))
+        self.wf_y_depth.valueChanged.connect(
+            lambda: self._update_wfield_plots(recompute=False))
+        self.wf_x_depth.valueChanged.connect(
+            lambda: self._update_wfield_plots(recompute=False))
+        self.wf_cmap.currentIndexChanged.connect(
+            lambda: self._update_wfield_plots(recompute=False))
+
+        self.addTab(wfield_widget, "Weighting Field")
 
         # ── Magboltz tab ──────────────────────────────────────────────────
         self._gas_canvas = None
@@ -1568,6 +1693,7 @@ class ResultsPanel(QTabWidget):
                 (self._tracks_canvas,      "tracks_3d"),
                 (self._gas_canvas,         "magboltz"),
                 (self._efield_root_canvas, "efield"),
+                (self._wfield_root_canvas, "wfield"),
             ]:
                 if canvas is None:
                     continue
@@ -2078,6 +2204,9 @@ class ResultsPanel(QTabWidget):
                     "wire_diam_um":  g.get("wire_diameter_um", 50.0),
                     "wire_volt_V":   g.get("wire_voltage_V",  1900.0),
                 }
+                # sense-wire indices (null/absent → all wires) for the anode
+                # weighting field in the Weighting Field tab
+                self._wf_sense_wires = g.get("sense_wires")
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[GUI] run_config.json read error: {exc}")
 
@@ -2092,6 +2221,13 @@ class ResultsPanel(QTabWidget):
             x_half = (tg["n_wires"] - 1) / 2 * tg["wire_pitch_cm"] + tg["wire_pitch_cm"]
             self.ef_y_depth.setRange(-tg["gap_cm"], tg["gap_cm"])
             self.ef_x_depth.setRange(-x_half, x_half)
+            # Pre-populate Weighting Field tab geometry spinboxes too
+            self.wf_gap.setValue(tg["gap_cm"])
+            self.wf_pitch.setValue(tg["wire_pitch_cm"])
+            self.wf_n_wires.setValue(tg["n_wires"])
+            self.wf_wire_diam.setValue(tg["wire_diam_um"])
+            self.wf_y_depth.setRange(-tg["gap_cm"], tg["gap_cm"])
+            self.wf_x_depth.setRange(-x_half, x_half)
 
         if not Path(root_path).exists():
             self.trk_dist_combo.blockSignals(False)
@@ -2627,6 +2763,209 @@ class ResultsPanel(QTabWidget):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] ROOT E-field error: {exc}")
 
+    # ── Weighting field ───────────────────────────────────────────────────────
+
+    def _ensure_garfield(self):
+        """Load the Garfield shared library into the PyROOT process (once).
+
+        libGarfield.dylib has unresolved @rpath dependencies and the GUI process
+        usually has no DYLD_LIBRARY_PATH, so we pre-load the dependent libraries by
+        absolute path (each one's @rpath install-name then satisfies the dependency)
+        before loading libGarfield itself.  Returns the ROOT.Garfield namespace, or
+        None if Garfield is unavailable.
+        """
+        if self._garfield is not None:
+            return self._garfield
+        if self._garfield_failed:
+            return None
+        try:
+            import ROOT  # noqa: PLC0415
+            gi = os.environ.get("GARFIELD_INSTALL") or str(
+                Path(__file__).resolve().parents[3] / "local" / "garfield")
+            libdir = Path(gi) / "lib"
+            ext = ".dylib" if sys.platform == "darwin" else ".so"
+            for dep in ("libGarfieldRandom", "libMagboltz", "libHeed", "libneBEM"):
+                ROOT.gSystem.Load(str(libdir / (dep + ext)))
+            if ROOT.gSystem.Load(str(libdir / ("libGarfield" + ext))) < 0:
+                raise RuntimeError(f"could not load libGarfield from {libdir}")
+            _ = ROOT.Garfield.ComponentAnalyticField   # force the dictionary to resolve
+            self._garfield = ROOT.Garfield
+            return self._garfield
+        except Exception as exc:  # noqa: BLE001
+            self._garfield_failed = True
+            self.append_log(
+                f"[GUI] Weighting-field tab disabled — Garfield not loadable: {exc}")
+            return None
+
+    def _compute_wfield(self, electrode, gap, pitch, n_wires, diam_um,
+                        nx, ny, sense_wires=None):
+        """Sample the exact weighting potential/field of `electrode` on a 2D grid.
+
+        Rebuilds the analytic geometry exactly as tgc_sim.cc BuildGeometry does and
+        evaluates ComponentAnalyticField.WeightingPotential / WeightingField per point.
+        Returns (x, y, W, Wx, Wy) with W dimensionless and Wx/Wy in 1/cm.
+        """
+        import ctypes  # noqa: PLC0415
+        g = self._ensure_garfield()
+        if g is None:
+            raise RuntimeError("Garfield not available")
+
+        caf = g.ComponentAnalyticField()
+        caf.AddPlaneY(-gap, 0., "cathode")
+        caf.AddPlaneY(+gap, 0., "cathode_top")
+        diam_cm = diam_um * 1e-4
+        sw = set(sense_wires) if sense_wires else None
+        for i in range(n_wires):
+            xw = (i - (n_wires - 1) / 2.0) * pitch
+            is_sense = (sw is None) or (i in sw)
+            caf.AddWire(xw, 0., diam_cm, 1900., "anode" if is_sense else "field")
+
+        x_half = (n_wires - 1) / 2.0 * pitch + pitch
+        x = np.linspace(-x_half, x_half, nx)
+        y = np.linspace(-gap * 0.999, gap * 0.999, ny)
+
+        W  = np.zeros((ny, nx))
+        Wx = np.zeros((ny, nx))
+        Wy = np.zeros((ny, nx))
+        cx, cy, cz = ctypes.c_double(0.), ctypes.c_double(0.), ctypes.c_double(0.)
+        for iy, yv in enumerate(y):
+            for ix, xv in enumerate(x):
+                W[iy, ix] = caf.WeightingPotential(float(xv), float(yv), 0.0, electrode)
+                caf.WeightingField(float(xv), float(yv), 0.0, cx, cy, cz, electrode)
+                Wx[iy, ix] = cx.value
+                Wy[iy, ix] = cy.value
+        return x, y, W, Wx, Wy
+
+    def _update_wfield_plots(self, recompute: bool = True):
+        """Draw weighting-field maps (XY colour map + X and Y profile slices)."""
+        if recompute:
+            gap     = self.wf_gap.value()
+            pitch   = self.wf_pitch.value()
+            n_wires = self.wf_n_wires.value()
+            diam_um = self.wf_wire_diam.value()
+            electrode = self.wf_electrode.currentText()
+            try:
+                x, y, W, Wx, Wy = self._compute_wfield(
+                    electrode, gap, pitch, n_wires, diam_um,
+                    nx=self.wf_nx.value(), ny=self.wf_ny.value(),
+                    sense_wires=getattr(self, "_wf_sense_wires", None))
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[GUI] Weighting-field computation error: {exc}")
+                return
+            self._wfield_cache = {"x": x, "y": y, "W": W, "Wx": Wx, "Wy": Wy,
+                                  "gap": gap, "pitch": pitch, "n_wires": n_wires,
+                                  "electrode": electrode}
+        elif self._wfield_cache is None:
+            return  # nothing cached yet
+
+        c         = self._wfield_cache
+        x, y      = c["x"], c["y"]
+        gap       = c["gap"]
+        pitch     = c["pitch"]
+        n_wires   = c["n_wires"]
+        electrode = c["electrode"]
+        x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
+        x_half  = (n_wires - 1) / 2 * pitch + pitch
+
+        quant = self.wf_quantity.currentText()
+        if   quant == "W (potential)": field, unit, sym = c["W"], "", "W"
+        elif quant == "|E_w|": field, unit, sym = np.hypot(c["Wx"], c["Wy"]), " [1/cm]", "|E_{w}|"
+        elif quant == "E_w,x": field, unit, sym = c["Wx"], " [1/cm]", "E_{w,x}"
+        else:                  field, unit, sym = c["Wy"], " [1/cm]", "E_{w,y}"
+
+        y0 = self.wf_y_depth.value()
+        x0 = self.wf_x_depth.value()
+        iy = int(np.argmin(np.abs(y - y0)))
+        ix = int(np.argmin(np.abs(x - x0)))
+        X, Y = np.meshgrid(x, y)
+
+        try:
+            import ROOT  # noqa: PLC0415
+            ROOT.gROOT.SetBatch(False)
+
+            if not self._root_canvas_alive(self._wfield_root_canvas, "tgc_wfield"):
+                self._wfield_root_canvas = None
+            if self._wfield_root_canvas is None:
+                self._wfield_root_canvas = ROOT.TCanvas(
+                    "tgc_wfield", "TGC Weighting Field", 1300, 500)
+
+            self._wfield_root_canvas.Clear()
+            self._wfield_root_canvas.Divide(3, 1)
+            self._wfield_objects.clear()
+
+            # ── Pad 1: XY plane (TH2F COLZ) ──────────────────────────────────
+            self._wfield_root_canvas.cd(1)
+            ROOT.gPad.SetLeftMargin(0.12)
+            ROOT.gPad.SetRightMargin(0.17)   # extra room for COLZ colour bar
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
+            nx_v, ny_v = len(x), len(y)
+            dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
+            dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
+            h2 = ROOT.TH2F(
+                "h_wfield",
+                f"XY plane - {sym}_{{{electrode}}}{unit};x [cm];y [cm]",
+                nx_v, x[0] - dx / 2, x[-1] + dx / 2,
+                ny_v, y[0] - dy / 2, y[-1] + dy / 2,
+            )
+            h2.SetStats(0)
+            h2.FillN(
+                nx_v * ny_v,
+                X.flatten().astype("f8"),
+                Y.flatten().astype("f8"),
+                field.flatten().astype("f8"),
+            )
+            h2.Draw("COLZ")
+            for x_w in x_wires:
+                m = ROOT.TMarker(x_w, 0.0, 5)
+                m.SetMarkerColor(ROOT.kWhite)
+                m.SetMarkerSize(1.5)
+                m.Draw()
+                self._wfield_objects.append(m)
+            for y_c in [-gap, gap]:
+                ln = ROOT.TLine(-x_half, y_c, x_half, y_c)
+                ln.SetLineStyle(2)
+                ln.SetLineColor(ROOT.kGray + 1)
+                ln.Draw()
+                self._wfield_objects.append(ln)
+            self._wfield_objects.append(h2)
+
+            # ── Pad 2: profile along x at y = y0 ─────────────────────────────
+            self._wfield_root_canvas.cd(2)
+            ROOT.gPad.SetLeftMargin(0.16)
+            ROOT.gPad.SetRightMargin(0.05)
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
+            g_xz = ROOT.TGraph(len(x), x.astype("f8"), field[iy, :].astype("f8"))
+            g_xz.SetTitle(
+                f"{sym} at y = {y[iy]:.3f} cm;x [cm];{sym}{unit}")
+            g_xz.SetLineColor(ROOT.kBlue + 1)
+            g_xz.SetLineWidth(2)
+            ROOT.gPad.SetGrid()
+            g_xz.Draw("AL")
+            self._wfield_objects.append(g_xz)
+
+            # ── Pad 3: profile along y at x = x0 ─────────────────────────────
+            self._wfield_root_canvas.cd(3)
+            ROOT.gPad.SetLeftMargin(0.16)
+            ROOT.gPad.SetRightMargin(0.05)
+            ROOT.gPad.SetTopMargin(0.12)
+            ROOT.gPad.SetBottomMargin(0.14)
+            g_zy = ROOT.TGraph(len(y), y.astype("f8"), field[:, ix].astype("f8"))
+            g_zy.SetTitle(
+                f"{sym} at x = {x[ix]:.3f} cm;y [cm];{sym}{unit}")
+            g_zy.SetLineColor(ROOT.kRed + 1)
+            g_zy.SetLineWidth(2)
+            ROOT.gPad.SetGrid()
+            g_zy.Draw("AL")
+            self._wfield_objects.append(g_zy)
+
+            self._wfield_root_canvas.Update()
+            self._root_timer.start()   # ensure timer is running
+
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[GUI] ROOT weighting-field error: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Main window
@@ -2825,7 +3164,7 @@ class MainWindow(QMainWindow):
             import ROOT  # noqa: PLC0415
             for _canvas in [rp._root_canvas, rp._charge_canvas,
                             rp._tracks_canvas, rp._efield_root_canvas,
-                            rp._gas_canvas]:
+                            rp._wfield_root_canvas, rp._gas_canvas]:
                 try:
                     if (_canvas is not None and
                             ROOT.gROOT.GetListOfCanvases()
