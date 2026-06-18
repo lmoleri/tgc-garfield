@@ -778,12 +778,12 @@ double InsulatorEpsR(const std::string& material) {
   return 3.5;  // kapton (default)
 }
 
-double ComputePadCouplingCapPf(const ReadoutConfig& ro) {
-  if (ro.type != "resistive" || ro.padAreaCm2 <= 0.) return 0.;
+double ComputePadBackplaneCapPf(const ReadoutConfig& ro) {
+  if (ro.type != "resistive" || ro.padAreaCm2 <= 0. || !ro.groundPlaneEnabled) return 0.;
   const double eps0SI = 8.854e-12;  // F/m
   const double areaM2 = ro.padAreaCm2 * 1.e-4;
-  const double dInsM  = ro.insulatorThicknessUm * 1.e-6;
-  return eps0SI * InsulatorEpsR(ro.insulatorMaterial) * areaM2 / dInsM * 1.e12;
+  const double dInsM  = ro.groundPlaneInsulatorUm * 1.e-6;
+  return eps0SI * InsulatorEpsR(ro.groundPlaneInsulatorMaterial) * areaM2 / dInsM * 1.e12;
 }
 
 ResistiveParams ComputeResistiveParams(const ReadoutConfig& ro,
@@ -899,10 +899,10 @@ struct AmplifierParams {
   double tauHpCathodeNs;  // R_in · couplingCap                    [pad AC coupling]
   double tauHpLowNs;      // 1/(2π f_low)   — intrinsic lower band edge
   double tauLpHighNs;     // 1/(2π f_high)  — intrinsic upper band edge
-  double tauLpCathodeInputNs;  // R_in · (C_pad + C_cable)         [pad RC loading]
+  double tauLpCathodeInputNs;  // R_in · (C_backplane + C_cable)   [pad RC loading]
   double mvPerFcPerNs;    // output scale: V_out[mV] = gain·R_in·i[µA]·1e-3
-  double cathodePadCapPf;      // resistive pad ↔ sheet capacitance [pF]
-  double cathodeTotalCapPf;    // pad + cable shunt capacitance     [pF]
+  double cathodeBackplaneCapPf;  // readout pad ↔ backplane capacitance [pF]
+  double cathodeTotalCapPf;      // backplane + cable shunt capacitance [pF]
   double outputSampleNs;       // finite acquisition aperture       [ns]
 };
 
@@ -913,8 +913,8 @@ AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp,
   const double cCpF  = amp.couplingCapNf * 1e3;           // nF → pF
   // Wire input: extra series cap in series with the coupling cap (1/C = Σ 1/Cᵢ).
   const double cWpF  = (cCpF * amp.wireSeriesCapPf) / (cCpF + amp.wireSeriesCapPf);
-  const double cathodePadCapPf   = ComputePadCouplingCapPf(ro);
-  const double cathodeTotalCapPf = cathodePadCapPf + amp.cathodeCableCapPf;
+  const double cathodeBackplaneCapPf = ComputePadBackplaneCapPf(ro);
+  const double cathodeTotalCapPf = cathodeBackplaneCapPf + amp.cathodeCableCapPf;
   // τ[ns] = R[Ω]·C[F]·1e9 = R[Ω]·C[pF]·1e-3.
   const double tauHpCathodeNs = R * cCpF * 1e-3;
   const double tauHpAnodeNs   = R * cWpF * 1e-3;
@@ -924,7 +924,7 @@ AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp,
   // i[fC/ns] ≡ i[µA]; V = gain·R·i[µA] in µV → ×1e-3 for mV.
   const double mvPerFcPerNs   = gain * R * 1e-3;
   return {tauHpAnodeNs, tauHpCathodeNs, tauHpLowNs, tauLpHighNs,
-          tauLpCathodeInputNs, mvPerFcPerNs, cathodePadCapPf,
+          tauLpCathodeInputNs, mvPerFcPerNs, cathodeBackplaneCapPf,
           cathodeTotalCapPf, amp.outputSampleNs};
 }
 
@@ -954,7 +954,7 @@ void ApplyBoxcarAverage(std::vector<double>& x, const double dtNs,
 // the filter order is irrelevant: upper-bandwidth low-pass, the channel's
 // AC-coupling high-pass (tauHpNs), the intrinsic lower-bandwidth high-pass, then
 // the gain·R_in scaling.  The cathode channel can also carry a pre-amplifier
-// input RC low-pass from the pad/cable capacitance and an optional finite
+// input RC low-pass from the backplane/cable capacitance and an optional finite
 // acquisition aperture on the output.
 std::vector<double> AmplifierOutputMv(const std::vector<double>& iFcNs,
                                       const double dtNs, const double tauHpNs,
@@ -1730,11 +1730,13 @@ int main(int argc, char* argv[]) {
       if (ap.cathodeTotalCapPf > 0.) {
         std::cout << "; cathode input RC τ " << ap.tauLpCathodeInputNs << " ns ("
                   << ap.cathodeTotalCapPf << " pF";
-        if (ap.cathodePadCapPf > 0.) {
-          std::cout << " = " << ap.cathodePadCapPf << " pF pad";
+        if (ap.cathodeBackplaneCapPf > 0.) {
+          std::cout << " = " << ap.cathodeBackplaneCapPf << " pF pad↔backplane";
           if (cfg.amplifier.cathodeCableCapPf > 0.) {
             std::cout << " + " << cfg.amplifier.cathodeCableCapPf << " pF cable";
           }
+        } else if (cfg.amplifier.cathodeCableCapPf > 0.) {
+          std::cout << " cable";
         }
         std::cout << ")";
       }

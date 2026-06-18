@@ -293,13 +293,14 @@ for the spike whenever τ_screen(footprint) ≫ the spike duration, i.e. unless
 ρ_s·ε_r/d is ~50× smaller than the defaults.
 
 If a measured pad waveform shows no spike, the cause is usually the measurement
-chain rather than the chamber: (a) the pad–sheet coupling is ~31 pF/cm²
-(ε₀ε_r/d for 100 μm Kapton), so a large pad into 50 Ω gives a 15–50 ns input RC
-that attenuates a 1 ns spike ×15–50; (b) a digitizer sampling at 10 ns averages
-it down another ×10; (c) if the real coating's ρ_s is much lower than configured,
-τ_screen drops into the few-ns range and the sheet itself starts eating the
-spike; (d) the spike carries only a small fraction of the pad charge (wire
-screening), so after any of the above it sits below the noise floor.
+chain rather than the chamber: (a) the readout pad can still see a substantial
+capacitance to the grounded backplane plus cable/scope input, so a large pad
+into 50 Ω gives a 10–50 ns input RC that attenuates a 1 ns spike strongly;
+(b) a digitizer sampling at 10 ns averages it down another ×10; (c) if the
+real coating's ρ_s is much lower than configured, τ_screen drops into the
+few-ns range and the sheet itself starts eating the spike; (d) the spike carries
+only a small fraction of the pad charge (wire screening), so after any of the
+above it sits below the noise floor.
 
 ### 5. Front-end electronics — fast current amplifier
 
@@ -348,11 +349,12 @@ actual ρ_s) — see *Why the electron spike appears on the simulated cathode* a
 
 To model that "elsewhere", the cathode channel now supports two optional
 measurement-chain terms without changing the Garfield weighting field itself:
-`readout.pad_area_cm2` adds the resistive-layer ↔ pad capacitance implied by the
-real pickup area, and `amplifier.cathode_cable_cap_pf` adds lumped cable/scope
-capacitance.  Together they create a cathode-side input RC low-pass before the
-current amplifier.  `amplifier.output_sample_ns` then applies a boxcar average
-to mimic the finite acquisition aperture of the digitizer.
+`readout.pad_area_cm2` sets the finite readout-pad area used to compute the
+pad ↔ grounded-backplane capacitance (when `ground_plane_enabled = true`), and
+`amplifier.cathode_cable_cap_pf` adds lumped cable/scope capacitance.  Together
+they create a cathode-side input RC low-pass before the current amplifier.
+`amplifier.output_sample_ns` then applies a boxcar average to mimic the finite
+acquisition aperture of the digitizer.
 
 ---
 
@@ -535,8 +537,8 @@ been built yet, the window opens with a warning in the title bar.
 | **Log** | Live stdout stream from `tgc_sim`, auto-scrolling |
 | **Summary** | Table from `summary.csv` — one row per source distance |
 | **Plots** | 2 × 3 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, ⟨Q_cathode_top⟩, charge ratio, and avalanche size vs source distance (with SEM error bars). Sixth cell empty |
-| **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). The **Amplifier output [mV]** checkbox switches the traces to the front-end amplifier output voltage (requires a file produced with `amplifier.enable = true`). Read directly from the ROOT file via uproot |
-| **Charge** | Cumulative charge integrals Q(t) — running integral of each waveform — for anode and cathode, per (distance, x-position) pair. An event slider selects individual events. ROOT TCanvas opens separately (PyROOT required) |
+| **Waveforms** | Per-event anode and cathode traces for a chosen (distance, x-position) combination. A shared **Display** selector in the Results tab bar switches both the Waveforms and Integrals tabs between **Amplifier** (default when nonzero amplifier output is available) and **Raw** Garfield signals. The **e⁻/ion components** checkbox overlays the separate electron and ion contributions only in Raw mode. Read directly from the ROOT file via uproot |
+| **Integrals** | Running integral of the currently displayed Waveforms mode for anode and cathode, per (distance, x-position) pair. In Raw mode this is cumulative charge `Q(t)` in fC; in Amplifier mode it is the cumulative amplifier-output integral in mV·ns. ROOT TCanvas opens separately (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
 | **Weighting Field** | Exact Shockley–Ramo weighting field/potential of a selected electrode (`anode`, `cathode`, `cathode_top`), computed with Garfield's `ComponentAnalyticField` — the same geometry the simulation uses, so the wire screening is faithful. Quantity selectable (W potential, \|E_w\|, E_w,x, E_w,y); XY colour map plus X/Y profile slices. Interactive from the geometry spinboxes — no simulation run needed. In resistive mode the cathode map is α-scaled and the insulator region shows the weighting-potential ramp (α→1 up to the readout pad), with the resistive layer and pad marked; the time-domain exp(−t/τ) relaxation is not shown on the static map. Requires PyROOT **and** a loadable Garfield library |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
@@ -578,7 +580,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
 | `resistive_layer_size_cm`      | float  | cm    | 20.0            | Across-wire size of the square resistive sheet. The two grounded edges parallel to the wires are this far apart, so it sets the relaxation time `τ ∝ size²`. Ignored when `type = "conductive"` |
-| `pad_area_cm2`                 | float  | cm²   | 0.0             | Finite pickup-pad area used **only** for the downstream pad/cable RC model in the amplifier stage. It does **not** change the Garfield weighting field, which remains the infinite cathode plane; use a boundary-element/FEM solve for true finite-pad induction |
+| `pad_area_cm2`                 | float  | cm²   | 0.0             | Finite readout-pad area used **only** for the downstream cathode amplifier RC model. When `ground_plane_enabled = true`, it sets the pad ↔ backplane capacitance together with `ground_plane_insulator_*`; otherwise it has no amplifier-side effect. It does **not** change the Garfield weighting field, which remains the infinite cathode plane; use a boundary-element/FEM solve for true finite-pad induction |
 | `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
 | `ground_plane_enabled`         | bool   | —     | `false`         | Add a grounded plane below the readout pad (resistive only). It adds a pad-to-ground capacitance `C_gnd` that lowers the weighting-potential factor α (`α = C_ins/(C_ins+C_gap+C_gnd)`), reducing the pad signal. Does not change the DC field or τ. No effect when `type = "conductive"` (the solid grounded cathode shields it — a note is printed) |
 | `ground_plane_insulator_um`    | float  | μm    | 1000.0          | Thickness of the pad ↔ ground-plane insulator (default 1 mm). Used only when `ground_plane_enabled` |
@@ -598,7 +600,7 @@ Physics § 5. All keys are ignored when `enable = false`.
 | `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | Lower −3 dB band edge → high-pass τ = 1/(2π·f) ≈ 15.9 µs. Slow baseline droop, visible only in long time windows |
 | `coupling_cap_nf`      | float  | nF   | 1.0          | AC-coupling capacitor at the input. With R_in sets the pad high-pass τ (1 nF, 50 Ω → 50 ns) |
 | `wire_series_cap_pf`   | float  | pF   | 470.0        | Extra series capacitor on the **anode (wire)** input only; in series with the coupling cap (470 pF ⊕ 1 nF = 320 pF) it gives the wire channel a shorter high-pass τ ≈ 16 ns |
-| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with `readout.pad_area_cm2` it creates a cathode-side input low-pass that can strongly suppress the prompt pad spike |
+| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with the pad ↔ backplane capacitance implied by `readout.pad_area_cm2` and `ground_plane_insulator_*`, it creates a cathode-side input low-pass that can suppress the prompt pad spike |
 | `output_sample_ns`     | float  | ns   | 0.0          | Finite acquisition aperture applied as a boxcar average on the amplifier output. Use this to mimic digitizer sampling that further averages down sub-ns features after the analog front end |
 
 ### `source`
@@ -727,7 +729,7 @@ the literal `dist_rnd`.
 | `ion_x/y/z` | vector\<float\> | Flattened ion drift paths [cm], up to 100 ions |
 | `ion_npts` | vector\<int\> | Number of drift-line points stored per ion path |
 
-This tree is read by the GUI Waveforms, Charges, and 3D Tracks tabs via `uproot`.
+This tree is read by the GUI Waveforms, Integrals, and 3D Tracks tabs via `uproot`.
 
 ---
 
@@ -773,7 +775,7 @@ currently-rendered ROOT TCanvas objects, one per tab, keyed as follows:
 | Key | Source tab | Contents |
 |-----|------------|----------|
 | `waveforms` | Waveforms  | Mean anode/cathode signal waveforms |
-| `charge`    | Charges    | Cumulative charge integrals Q(t) |
+| `charge`    | Integrals  | Cumulative integrals of the displayed waveform mode |
 | `tracks_3d` | 3D Tracks  | 3D drift-line and geometry view |
 | `magboltz`  | Magboltz   | Gas transport-coefficient panels |
 | `efield`    | E-Field    | 2D electric-field maps |

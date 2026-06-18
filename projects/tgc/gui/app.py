@@ -258,9 +258,9 @@ class ConfigPanel(QScrollArea):
         )
         self.pad_area = self._dspin(0.0, 1000.0, 0.5, 2, 0.0)
         self.pad_area.setToolTip(
-            "Pickup-pad area [cm²] used only for the pad/cable RC loading model.\n"
-            "It does not change the Garfield weighting field, which remains the\n"
-            "infinite cathode plane."
+            "Pickup-pad area [cm²] used only for the cathode amplifier RC model.\n"
+            "With a grounded backplane below the pad it sets the pad↔backplane\n"
+            "capacitance. It does not change the Garfield weighting field."
         )
 
         self.delayed_signal_cb = QCheckBox()
@@ -338,7 +338,8 @@ class ConfigPanel(QScrollArea):
         self.amp_cathode_cable = self._dspin(0.0, 100000.0, 1.0, 1, 0.0)
         self.amp_cathode_cable.setToolTip(
             "Extra cathode-channel capacitance to ground [pF] from cable, connectors,\n"
-            "scope input, etc. Combined with the pad area it creates a pad-side input RC."
+            "scope input, etc. Combined with the pad↔backplane capacitance it creates\n"
+            "the cathode-side input RC."
         )
         self.amp_sample_ns = self._dspin(0.0, 100000.0, 0.5, 2, 0.0)
         self.amp_sample_ns.setToolTip(
@@ -913,7 +914,7 @@ class MplCanvas(FigureCanvasQTAgg):
 # ---------------------------------------------------------------------------
 
 class ResultsPanel(QTabWidget):
-    """Four-tab panel: Log | Summary | Plots | Waveforms."""
+    """Results browser with summary tables, plots, waveforms, integrals, and tracks."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -978,6 +979,26 @@ class ResultsPanel(QTabWidget):
         self._garfield = None              # cached ROOT.Garfield once libs are loaded
         self._garfield_failed = False      # don't retry the load after a failure
         self.config_panel = None           # set by MainWindow; live readout settings
+        self._amp_mode_available = False
+
+        mode_widget = QWidget()
+        mode_layout = QHBoxLayout(mode_widget)
+        mode_layout.setContentsMargins(0, 0, 4, 0)
+        mode_layout.setSpacing(6)
+        mode_layout.addWidget(QLabel("Display:"))
+        self.signal_mode_combo = QComboBox()
+        self.signal_mode_combo.addItem("Amplifier", "amp")
+        self.signal_mode_combo.addItem("Raw", "raw")
+        self.signal_mode_combo.setToolTip(
+            "Shared display mode for the Waveforms and Integrals tabs.\n"
+            "Amplifier mode plots the front-end output branches when they are available;\n"
+            "Raw mode shows the Garfield induced-current waveforms."
+        )
+        mode_layout.addWidget(self.signal_mode_combo)
+        self.setCornerWidget(mode_widget, Qt.TopRightCorner)
+        self._signal_mode_widget = mode_widget
+        self._signal_mode_widget.hide()
+        self.signal_mode_combo.currentIndexChanged.connect(self._on_signal_mode_changed)
 
         wave_widget = QWidget()
         wave_layout = QVBoxLayout(wave_widget)
@@ -1011,23 +1032,21 @@ class ResultsPanel(QTabWidget):
             "Overlay the electron and ion contributions to the induced current\n"
             "(requires a ROOT file produced with the component-split branches).")
         sel_h.addWidget(self.wave_split_cb)
-        self.wave_amp_cb = QCheckBox("Amplifier output [mV]")
-        self.wave_amp_cb.setToolTip(
-            "Plot the amplifier output voltage [mV] instead of the induced current\n"
-            "(requires a ROOT file produced with amplifier.enable = true).")
-        sel_h.addWidget(self.wave_amp_cb)
         wave_layout.addWidget(sel_row)
 
         # — per-event info —
         info_box  = QGroupBox("Current event")
         info_form = QFormLayout(info_box)
         info_form.setVerticalSpacing(2)
+        self.wave_qa_title_lbl = QLabel("Q anode [fC]:")
+        self.wave_qc_title_lbl = QLabel("Q cathode [fC]:")
+        self.wave_ratio_title_lbl = QLabel("Q ratio:")
         self.wave_qa_lbl    = QLabel("—")
         self.wave_qc_lbl    = QLabel("—")
         self.wave_ratio_lbl = QLabel("—")
-        info_form.addRow("Q anode [fC]:",   self.wave_qa_lbl)
-        info_form.addRow("Q cathode [fC]:", self.wave_qc_lbl)
-        info_form.addRow("Ratio:",          self.wave_ratio_lbl)
+        info_form.addRow(self.wave_qa_title_lbl,   self.wave_qa_lbl)
+        info_form.addRow(self.wave_qc_title_lbl,   self.wave_qc_lbl)
+        info_form.addRow(self.wave_ratio_title_lbl, self.wave_ratio_lbl)
         wave_layout.addWidget(info_box)
 
         # — hint —
@@ -1044,11 +1063,10 @@ class ResultsPanel(QTabWidget):
         self.wave_xpos_combo.currentIndexChanged.connect(self._on_wave_xpos_changed)
         self.wave_event_slider.valueChanged.connect(self._update_waveform_plot)
         self.wave_split_cb.toggled.connect(self._update_waveform_plot)
-        self.wave_amp_cb.toggled.connect(self._update_waveform_plot)
 
         self.addTab(wave_widget, "Waveforms")
 
-        # ── Charges tab: cumulative integral of waveforms ────────────────────
+        # ── Integrals tab: cumulative integral of the displayed waveforms ────
         charge_widget  = QWidget()
         charge_layout  = QVBoxLayout(charge_widget)
         charge_layout.setContentsMargins(8, 6, 8, 6)
@@ -1091,7 +1109,7 @@ class ResultsPanel(QTabWidget):
         self.charge_xpos_combo.currentIndexChanged.connect(self._on_charge_xpos_changed)
         self.charge_event_slider.valueChanged.connect(self._update_charge_plot)
 
-        self.addTab(charge_widget, "Charges")
+        self.addTab(charge_widget, "Integrals")
 
         # ── 3D Tracks tab ─────────────────────────────────────────────────────
         tracks_widget = QWidget()
@@ -1811,7 +1829,7 @@ class ResultsPanel(QTabWidget):
         try:
             import uproot  # noqa: PLC0415
         except ImportError:
-            self.append_log("[GUI] uproot not available — waveform tab will be empty")
+            self.append_log("[GUI] uproot not available — Waveforms/Integrals tabs will be empty")
             return
 
         if not Path(root_path).exists():
@@ -1824,6 +1842,7 @@ class ResultsPanel(QTabWidget):
         self._warned_no_split = False
 
         self._waveform_data.clear()
+        self._set_signal_mode_available(False)
         self.wave_dist_combo.blockSignals(True)
         self.wave_dist_combo.clear()
         self.wave_xpos_combo.blockSignals(True)
@@ -1833,7 +1852,18 @@ class ResultsPanel(QTabWidget):
         self.charge_xpos_combo.blockSignals(True)
         self.charge_xpos_combo.clear()
 
+        run_config_amp = False
+        run_config_path = Path(root_path).with_name("run_config.json")
+        if run_config_path.exists():
+            try:
+                with run_config_path.open("r", encoding="utf-8") as fh:
+                    run_cfg = json.load(fh)
+                run_config_amp = bool(run_cfg.get("amplifier", {}).get("enable", False))
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[GUI] Could not read {run_config_path.name}: {exc}")
+
         try:
+            amp_available_any = False
             with uproot.open(root_path) as f:
                 dist_keys = sorted({
                     k.split("/")[0] for k in f.keys(cycle=False)
@@ -1863,6 +1893,7 @@ class ResultsPanel(QTabWidget):
                             "cathode": cathode,
                             "mean_a":  mean_a,
                             "mean_c":  mean_c,
+                            "amp_available": False,
                         }
                         # e⁻/ion component branches (newer ROOT files only)
                         if "anode_e" in tree.keys():
@@ -1875,6 +1906,12 @@ class ResultsPanel(QTabWidget):
                                 data[br] = np.stack(tree[br].array(library="np"))
                             data["mean_a_amp"] = f[f"{key}/p_anode_amp"].values()
                             data["mean_c_amp"] = f[f"{key}/p_cathode_amp"].values()
+                            amp_nonzero = (
+                                self._array_has_signal(data["mean_a_amp"])
+                                or self._array_has_signal(data["mean_c_amp"])
+                            )
+                            data["amp_available"] = run_config_amp or amp_nonzero
+                            amp_available_any = amp_available_any or data["amp_available"]
                         self._waveform_data.setdefault(dist_label, {})[xpos_label] = data
                     except Exception as exc:  # noqa: BLE001
                         self.append_log(f"[GUI] Waveforms: could not read {key}: {exc}")
@@ -1882,6 +1919,7 @@ class ResultsPanel(QTabWidget):
                 for dl in self._sorted_dists(self._waveform_data.keys()):
                     self.wave_dist_combo.addItem(dl)
                     self.charge_dist_combo.addItem(dl)
+                self._set_signal_mode_available(amp_available_any)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] Could not open ROOT file: {exc}")
 
@@ -1916,6 +1954,58 @@ class ResultsPanel(QTabWidget):
             except ValueError:
                 return -1e9
         return sorted(dists_iterable, key=_key)
+
+    @staticmethod
+    def _array_has_signal(arr) -> bool:
+        return bool(np.any(np.abs(np.asarray(arr, dtype="f8")) > 0.0))
+
+    def _set_signal_mode_available(self, amp_available: bool):
+        self._amp_mode_available = amp_available
+        self.signal_mode_combo.blockSignals(True)
+        self.signal_mode_combo.setCurrentIndex(0 if amp_available else 1)
+        self.signal_mode_combo.blockSignals(False)
+        self._signal_mode_widget.setVisible(amp_available)
+
+    def _display_amp_mode(self, data: dict | None = None) -> bool:
+        if not self._amp_mode_available or self.signal_mode_combo.currentData() != "amp":
+            return False
+        return True if data is None else bool(data.get("amp_available", False))
+
+    def _select_display_series(self, data: dict, evt_idx: int) -> dict:
+        amp_mode = self._display_amp_mode(data)
+        if amp_mode:
+            return {
+                "amp_mode": True,
+                "anode": data["anode_amp"][evt_idx].astype("f8"),
+                "cathode": data["cathode_amp"][evt_idx].astype("f8"),
+                "mean_a": data["mean_a_amp"].astype("f8"),
+                "mean_c": data["mean_c_amp"].astype("f8"),
+                "wave_units": "V [mV]",
+                "integral_units": "∫V [mV·ns]",
+                "metric_labels": ("∫V anode [mV·ns]:", "∫V cathode [mV·ns]:", "∫V ratio:"),
+            }
+        return {
+            "amp_mode": False,
+            "anode": data["anode"][evt_idx].astype("f8"),
+            "cathode": data["cathode"][evt_idx].astype("f8"),
+            "mean_a": data["mean_a"].astype("f8"),
+            "mean_c": data["mean_c"].astype("f8"),
+            "wave_units": "i [fC/ns]",
+            "integral_units": "Q [fC]",
+            "metric_labels": ("Q anode [fC]:", "Q cathode [fC]:", "Q ratio:"),
+        }
+
+    @staticmethod
+    def _displayed_event_metrics(anode: np.ndarray, cathode: np.ndarray,
+                                 dt: float) -> tuple[float, float, float]:
+        qa = float(-np.sum(anode) * dt)
+        qc = float(np.sum(cathode) * dt)
+        ratio = qc / qa if qa != 0 else float("nan")
+        return qa, qc, ratio
+
+    def _on_signal_mode_changed(self, _index: int):
+        self._update_waveform_plot()
+        self._update_charge_plot()
 
     def _rebuild_charge_xpos(self):
         """Repopulate charge_xpos_combo to match the current charge_dist selection."""
@@ -2020,39 +2110,26 @@ class ResultsPanel(QTabWidget):
         nbins   = len(times)
         dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
 
-        # Charge labels are event properties — always from the raw induced current.
-        qa    = float(-np.sum(data["anode"][evt_idx].astype("f8"))   * dt)
-        qc    = float( np.sum(data["cathode"][evt_idx].astype("f8")) * dt)
-        ratio = qc / qa if qa != 0 else float("nan")
+        series = self._select_display_series(data, evt_idx)
+        qa, qc, ratio = self._displayed_event_metrics(
+            series["anode"], series["cathode"], dt
+        )
+        self.wave_qa_title_lbl.setText(series["metric_labels"][0])
+        self.wave_qc_title_lbl.setText(series["metric_labels"][1])
+        self.wave_ratio_title_lbl.setText(series["metric_labels"][2])
         self.wave_qa_lbl.setText(f"{qa:.4g}")
         self.wave_qc_lbl.setText(f"{qc:.4g}")
         self.wave_ratio_lbl.setText(f"{ratio:.4g}")
-
-        # Amplifier-output mode: plot V [mV] instead of the induced current.
-        amp_mode = self.wave_amp_cb.isChecked()
-        if amp_mode and "anode_amp" not in data:
-            if not getattr(self, "_warned_no_amp", False):
-                self.append_log(
-                    "[GUI] This ROOT file has no amplifier-output branches "
-                    "(run with amplifier.enable = true) — toggle ignored.")
-                self._warned_no_amp = True
-            amp_mode = False
-
-        if amp_mode:
-            anode   = data["anode_amp"][evt_idx].astype("f8")
-            cathode = data["cathode_amp"][evt_idx].astype("f8")
-            mean_a  = data["mean_a_amp"].astype("f8")
-            mean_c  = data["mean_c_amp"].astype("f8")
-            units   = "V [mV]"
-        else:
-            anode   = data["anode"][evt_idx].astype("f8")
-            cathode = data["cathode"][evt_idx].astype("f8")
-            mean_a  = data["mean_a"].astype("f8")
-            mean_c  = data["mean_c"].astype("f8")
-            units   = "i [fC/ns]"
+        amp_mode = series["amp_mode"]
+        anode   = series["anode"]
+        cathode = series["cathode"]
+        mean_a  = series["mean_a"]
+        mean_c  = series["mean_c"]
+        units   = series["wave_units"]
 
         # Optional e⁻/ion component overlay (current mode only)
         split = self.wave_split_cb.isChecked() and not amp_mode
+        self.wave_split_cb.setEnabled(not amp_mode and "anode_e" in data)
         if split and "anode_e" not in data:
             if not getattr(self, "_warned_no_split", False):
                 self.append_log(
@@ -2128,7 +2205,7 @@ class ResultsPanel(QTabWidget):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[GUI] ROOT canvas error: {exc}")
 
-    # ── Charges (cumulative integral) ─────────────────────────────────────────
+    # ── Integrals (cumulative integral of the displayed mode) ─────────────────
 
     def _on_charge_dist_changed(self, index: int):
         dist_label = self.charge_dist_combo.currentText()
@@ -2169,7 +2246,7 @@ class ResultsPanel(QTabWidget):
         self._update_charge_plot()
 
     def _update_charge_plot(self):
-        """Draw cumulative charge integrals Q(t) in a ROOT TCanvas (anode top, cathode bottom)."""
+        """Draw cumulative integrals of the displayed waveform mode in a ROOT TCanvas."""
         dist_label = self.charge_dist_combo.currentText()
         xpos_label = self.charge_xpos_combo.currentText()
         data  = self._waveform_data.get(dist_label, {}).get(xpos_label)
@@ -2182,14 +2259,16 @@ class ResultsPanel(QTabWidget):
         self.charge_event_label.setText(f"{evt_idx + 1} / {n}")
 
         times   = data["times"].astype("f8")
-        anode   = data["anode"][evt_idx].astype("f8")
-        cathode = data["cathode"][evt_idx].astype("f8")
-        mean_a  = data["mean_a"].astype("f8")
-        mean_c  = data["mean_c"].astype("f8")
+        series  = self._select_display_series(data, evt_idx)
+        anode   = series["anode"]
+        cathode = series["cathode"]
+        mean_a  = series["mean_a"]
+        mean_c  = series["mean_c"]
         nbins   = len(times)
         dt      = float(times[1] - times[0]) if nbins > 1 else 1.0
 
-        # Cumulative integrals [fC]; anode signal is negative by convention → negate.
+        # Cumulative integrals of the displayed waveform; keep the sign convention
+        # consistent between raw current and amplifier output for easy comparison.
         anode_int   = -np.cumsum(anode)  * dt
         cathode_int =  np.cumsum(cathode) * dt
         mean_a_int  = -np.cumsum(mean_a) * dt
@@ -2203,7 +2282,7 @@ class ResultsPanel(QTabWidget):
                 self._charge_canvas = None
             if self._charge_canvas is None:
                 self._charge_canvas = ROOT.TCanvas(
-                    "tgc_charges", "TGC Charges", 950, 700
+                    "tgc_charges", "TGC Integrals", 950, 700
                 )
                 self._charge_canvas.SetWindowSize(950, 700)
 
@@ -2217,8 +2296,8 @@ class ResultsPanel(QTabWidget):
                 ROOT.gPad.SetGrid()
                 ga = ROOT.TGraph(nbins, times, y_evt)
                 ga.SetTitle(
-                    f"{signal_name} charge - {label}, event {evt_idx + 1};"
-                    f"Time [ns];Q [fC]"
+                    f"{signal_name} integral - {label}, event {evt_idx + 1};"
+                    f"Time [ns];{series['integral_units']}"
                 )
                 ga.SetLineColor(line_color)
                 ga.SetLineWidth(2)
