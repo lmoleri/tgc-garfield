@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
@@ -49,6 +50,18 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+# ---------------------------------------------------------------------------
+# Readout-stack geometry (shared by the E-Field and Weighting Field overlays)
+# ---------------------------------------------------------------------------
+
+# resistive: resistive cathode readout selected; d_ins_cm/y_pad: upper insulator
+# thickness and the readout-pad y; gnd/d_gnd_cm/y_gnd: optional grounded backplane
+# below the pad; y_bottom: lowest drawn surface (for axis ranges).
+ReadoutLayout = namedtuple(
+    "ReadoutLayout",
+    "resistive d_ins_cm y_pad gnd d_gnd_cm y_gnd y_bottom")
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -2673,80 +2686,107 @@ class ResultsPanel(QTabWidget):
         return x, y, Ex, Ey
 
     def _readout_layout(self, gap):
-        """Live readout geometry from the Config panel.
+        """Live readout-stack geometry from the Config panel.
 
-        Returns (resistive, d_ins_cm, y_pad): the resistive layer sits at the gas
-        boundary y=-gap; the conductive readout pad sits at y_pad = -gap - d_ins.
+        Returns a ReadoutLayout: the resistive layer sits at the gas boundary
+        y=-gap; the conductive readout pad sits at y_pad = -gap - d_ins; an
+        optional grounded plane sits a further d_gnd below at y_gnd (resistive
+        mode only).  y_bottom is the lowest drawn surface (for axis ranges).
         Falls back to a conductive plane at -gap when no Config panel is linked.
         """
         cp = self.config_panel
         if cp is None:
-            return False, 0.0, -gap
+            return ReadoutLayout(False, 0.0, -gap, False, 0.0, -gap, -gap)
         resistive = cp.readout_type.currentText() == "Resistive"
-        d_ins_cm = min(cp.insulator_thickness.value() * 1e-4, gap) if resistive else 0.0
-        return resistive, d_ins_cm, -gap - d_ins_cm
+        d_ins_cm  = min(cp.insulator_thickness.value() * 1e-4, gap) if resistive else 0.0
+        y_pad     = -gap - d_ins_cm
+        gnd       = resistive and cp.ground_plane_cb.isChecked()
+        d_gnd_cm  = cp.ground_plane_thickness.value() * 1e-4 if gnd else 0.0
+        y_gnd     = y_pad - d_gnd_cm
+        y_bottom  = y_gnd if gnd else (y_pad if resistive else -gap)
+        return ReadoutLayout(resistive, d_ins_cm, y_pad, gnd, d_gnd_cm, y_gnd, y_bottom)
 
-    def _draw_readout_markers(self, objects, x_half, gap, shade_insulator=True):
-        """Mark the readout cathode, resistive layer, and insulator pad on a 2D map.
+    def _draw_readout_markers(self, objects, x_half, gap, x_wires=(),
+                              wire_diam_cm=0.0, shade_insulator=True):
+        """Draw the electrode/insulator stack overlay on a 2D map.
 
-        Draws into the current gPad and appends every ROOT primitive to `objects`
-        so Python keeps them alive.  Mirrors the gas-gap geometry the simulation uses.
-        `shade_insulator` paints a grey band over the insulator strip; pass False when
-        that region already holds real data (the cathode weighting-potential ramp).
+        Single source of the geometry overlay for both the E-Field and Weighting
+        Field tabs.  Draws the anode wires (to-scale circle + centre marker), the
+        ground cathode, and — in resistive mode — the resistive layer, the pad, the
+        insulator band(s) and the optional ground plane, plus a compact legend.
+        Appends every ROOT primitive to `objects` so Python keeps them alive.
+        `shade_insulator` shades the upper (pad) insulator band; pass False where
+        that strip already holds data (the cathode weighting-potential ramp).
         """
         import ROOT  # noqa: PLC0415
-        resistive, d_ins_cm, y_pad = self._readout_layout(gap)
+        lay = self._readout_layout(gap)
 
-        def _label(x, y, text, color):
-            t = ROOT.TLatex(x, y, text)
-            t.SetTextSize(0.030)
-            t.SetTextColor(color)
-            t.Draw()
-            objects.append(t)
+        def _line(y, color, width=2, style=1):
+            ln = ROOT.TLine(-x_half, y, x_half, y)
+            ln.SetLineColor(color); ln.SetLineWidth(width); ln.SetLineStyle(style)
+            ln.Draw(); objects.append(ln); return ln
 
-        x_lab = -x_half + 0.04 * (2 * x_half)   # a little in from the left frame edge
+        def _band(y0, y1, color, alpha=0.30):
+            b = ROOT.TBox(-x_half, y0, x_half, y1)
+            b.SetFillColorAlpha(color, alpha); b.Draw(); objects.append(b); return b
 
-        # Top plane: non-readout ground cathode (grey dashed, as before)
-        top = ROOT.TLine(-x_half, gap, x_half, gap)
-        top.SetLineStyle(2)
-        top.SetLineColor(ROOT.kGray + 1)
-        top.Draw()
-        objects.append(top)
-        _label(x_lab, gap - 0.07 * gap, "cathode (ground)", ROOT.kGray + 2)
+        legend = []   # (proxy_object, label, draw_option)
 
-        if resistive:
-            # Insulator band between the resistive layer (-gap) and the pad (y_pad).
-            # Only shade it when the strip is otherwise empty (don't cover real data).
+        # ── Anode wires: 50 µm circle to scale + a centre marker for visibility ──
+        r = max(wire_diam_cm * 0.5, 0.0)
+        wire_proxy = None
+        for x_w in x_wires:
+            if r > 0:
+                e = ROOT.TEllipse(x_w, 0.0, r, r)
+                e.SetLineColor(ROOT.kWhite); e.SetLineWidth(1)
+                e.SetFillStyle(0); e.Draw(); objects.append(e)
+            m = ROOT.TMarker(x_w, 0.0, 5)      # style 5 = ✕
+            m.SetMarkerColor(ROOT.kWhite); m.SetMarkerSize(1.2)
+            m.Draw(); objects.append(m)
+            wire_proxy = m
+        if wire_proxy is not None:
+            legend.append((wire_proxy, "anode wires (+HV)", "p"))
+
+        # ── Top (non-readout) ground cathode: grey dashed ──
+        top = _line(gap, ROOT.kGray + 1, width=2, style=2)
+        legend.append((top, "cathode (ground)", "l"))
+
+        if lay.resistive:
+            # Upper insulator band (pad ↔ resistive layer); skip the fill where the
+            # cathode ramp data lives, but always key it in the legend.
             if shade_insulator:
-                band = ROOT.TBox(-x_half, y_pad, x_half, -gap)
-                band.SetFillColorAlpha(ROOT.kGray, 0.35)
-                band.Draw()
-                objects.append(band)
-            _label(x_lab, 0.5 * (y_pad - gap), "insulator", ROOT.kGray + 3)
+                ib = _band(lay.y_pad, -gap, ROOT.kGray, 0.30)
+            else:
+                ib = ROOT.TBox(-x_half, lay.y_pad, x_half, -gap)   # legend proxy only
+                ib.SetFillColorAlpha(ROOT.kGray, 0.30)
+                objects.append(ib)
+            rl = _line(-gap, ROOT.kOrange + 7)
+            pad = _line(lay.y_pad, ROOT.kRed + 1)
+            legend.append((rl,  "resistive layer", "l"))
+            legend.append((pad, "readout pad", "l"))
+            legend.append((ib,  "insulator", "f"))
 
-            # Resistive layer at the gas boundary (orange solid)
-            rl = ROOT.TLine(-x_half, -gap, x_half, -gap)
-            rl.SetLineColor(ROOT.kOrange + 7)
-            rl.SetLineWidth(2)
-            rl.Draw()
-            objects.append(rl)
-            _label(x_lab, -gap + 0.02 * gap, "resistive layer", ROOT.kOrange + 7)
-
-            # Conductive readout cathode pad behind the insulator (red solid)
-            pad = ROOT.TLine(-x_half, y_pad, x_half, y_pad)
-            pad.SetLineColor(ROOT.kRed + 1)
-            pad.SetLineWidth(2)
-            pad.Draw()
-            objects.append(pad)
-            _label(x_lab, y_pad + 0.02 * gap, "readout cathode (pad)", ROOT.kRed + 1)
+            if lay.gnd:
+                # Ground-plane insulator band (always blank below the pad → shade it),
+                # then the grounded plane itself (black, solid).
+                gb = _band(lay.y_gnd, lay.y_pad, ROOT.kAzure, 0.18)
+                gp = _line(lay.y_gnd, ROOT.kBlack)
+                legend.append((gb, "ground insulator", "f"))
+                legend.append((gp, "ground plane", "l"))
         else:
-            # Solid readout cathode plane at -gap (red solid)
-            rc = ROOT.TLine(-x_half, -gap, x_half, -gap)
-            rc.SetLineColor(ROOT.kRed + 1)
-            rc.SetLineWidth(2)
-            rc.Draw()
-            objects.append(rc)
-            _label(x_lab, -gap + 0.02 * gap, "readout cathode", ROOT.kRed + 1)
+            rc = _line(-gap, ROOT.kRed + 1)
+            legend.append((rc, "readout cathode", "l"))
+
+        # ── Compact legend keyed to the stack ──
+        # Top-left, inside the frame (clear of the title and the COLZ palette bar),
+        # on a translucent white background so it stays readable over the map.
+        leg = ROOT.TLegend(0.135, 0.655, 0.60, 0.865)
+        leg.SetNColumns(2)
+        leg.SetFillColorAlpha(ROOT.kWhite, 0.66)
+        leg.SetBorderSize(0); leg.SetTextSize(0.027)
+        for proxy, text, opt in legend:
+            leg.AddEntry(proxy, text, opt)
+        leg.Draw(); objects.append(leg)
 
     def _update_efield_plots(self, recompute: bool = True):
         """Draw electric-field maps for XY, ZX-slice, and ZY-slice planes."""
@@ -2765,7 +2805,7 @@ class ResultsPanel(QTabWidget):
                 return
             self._efield_cache = {"x": x, "y": y, "Ex": Ex, "Ey": Ey,
                                   "gap": gap, "pitch": pitch,
-                                  "n_wires": n_wires}
+                                  "n_wires": n_wires, "wire_diam_um": diam_um}
         elif self._efield_cache is None:
             return  # nothing cached yet
 
@@ -2775,6 +2815,7 @@ class ResultsPanel(QTabWidget):
         gap     = c["gap"]
         pitch   = c["pitch"]
         n_wires = c["n_wires"]
+        wire_diam_cm = c.get("wire_diam_um", 50.0) * 1e-4
         x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
         x_half  = (n_wires - 1) / 2 * pitch + pitch
 
@@ -2813,11 +2854,12 @@ class ResultsPanel(QTabWidget):
             dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
             dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
             y_top, y_bot = y[-1] + dy / 2, y[0] - dy / 2
-            # Extend the y-axis below -gap to expose the insulator/pad stack (resistive
-            # mode); the extra rows stay empty (COLZ skips them) → blank insulator strip.
-            _resistive, _dins, _ypad = self._readout_layout(gap)
-            n_extra = (max(0, int(np.ceil((y_bot - (_ypad - max(0.4 * _dins, 0.02 * gap))) / dy)))
-                       if _resistive else 0)
+            # Extend the y-axis below -gap to expose the full readout stack (resistive
+            # layer / insulator / pad / ground plane); the extra rows stay empty (COLZ
+            # skips them) → blank insulator strips the overlay then annotates.
+            lay = self._readout_layout(gap)
+            y_floor = lay.y_bottom - (0.06 * gap if lay.resistive else 0.0)
+            n_extra = max(0, int(np.ceil((y_bot - y_floor) / dy)))
             h2 = ROOT.TH2F(
                 "h_efield",
                 f"XY plane - {comp} [V/cm];x [cm];y [cm]",
@@ -2832,13 +2874,8 @@ class ResultsPanel(QTabWidget):
                 field.flatten().astype("f8"),
             )
             h2.Draw("COLZ")
-            for x_w in x_wires:
-                m = ROOT.TMarker(x_w, 0.0, 5)
-                m.SetMarkerColor(ROOT.kWhite)
-                m.SetMarkerSize(1.5)
-                m.Draw()
-                self._efield_objects.append(m)
-            self._draw_readout_markers(self._efield_objects, x_half, gap)
+            self._draw_readout_markers(self._efield_objects, x_half, gap,
+                                       x_wires, wire_diam_cm)
             self._efield_objects.append(h2)
 
             # ── Pad 2: E(x) profile at y = y0 ────────────────────────────────
@@ -2993,11 +3030,11 @@ class ResultsPanel(QTabWidget):
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[GUI] Weighting-field computation error: {exc}")
                 return
-            _res, _dins, _ = self._readout_layout(gap)
+            lay = self._readout_layout(gap)
             self._wfield_cache = {"x": x, "y": y, "W": W, "Wx": Wx, "Wy": Wy,
                                   "gap": gap, "pitch": pitch, "n_wires": n_wires,
-                                  "electrode": electrode,
-                                  "resistive": _res, "d_ins_cm": _dins}
+                                  "electrode": electrode, "wire_diam_um": diam_um,
+                                  "resistive": lay.resistive, "d_ins_cm": lay.d_ins_cm}
         elif self._wfield_cache is None:
             return  # nothing cached yet
 
@@ -3007,6 +3044,7 @@ class ResultsPanel(QTabWidget):
         pitch     = c["pitch"]
         n_wires   = c["n_wires"]
         electrode = c["electrode"]
+        wire_diam_cm = c.get("wire_diam_um", 50.0) * 1e-4
         x_wires = [(i - (n_wires - 1) / 2) * pitch for i in range(n_wires)]
         x_half  = (n_wires - 1) / 2 * pitch + pitch
 
@@ -3045,13 +3083,18 @@ class ResultsPanel(QTabWidget):
             nx_v, ny_v = len(x), len(y)
             dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
             dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
-            # The grid from _compute_wfield already includes the insulator rows below -gap
-            # (resistive mode), so the TH2 spans the full data range.
+            # The grid from _compute_wfield already reaches down to the pad (resistive
+            # mode).  Extend the display axis a little further when a ground plane sits
+            # below the pad so its band + line are visible (the extra rows stay empty).
+            lay   = self._readout_layout(gap)
+            y_lo  = y[0] - dy / 2
+            y_flr = min(y_lo, lay.y_bottom - 0.06 * gap)
+            n_extra = max(0, int(np.ceil((y_lo - y_flr) / dy)))
             h2 = ROOT.TH2F(
                 "h_wfield",
                 f"XY plane - {sym}_{{{electrode}}}{unit};x [cm];y [cm]",
                 nx_v, x[0] - dx / 2, x[-1] + dx / 2,
-                ny_v, y[0] - dy / 2, y[-1] + dy / 2,
+                ny_v + n_extra, y_lo - n_extra * dy, y[-1] + dy / 2,
             )
             h2.SetStats(0)
             h2.FillN(
@@ -3061,15 +3104,10 @@ class ResultsPanel(QTabWidget):
                 field.flatten().astype("f8"),
             )
             h2.Draw("COLZ")
-            for x_w in x_wires:
-                m = ROOT.TMarker(x_w, 0.0, 5)
-                m.SetMarkerColor(ROOT.kWhite)
-                m.SetMarkerSize(1.5)
-                m.Draw()
-                self._wfield_objects.append(m)
             # The cathode insulator is filled with the real ramp → don't shade over it;
             # for anode/cathode_top the insulator is blank, so keep the grey band.
             self._draw_readout_markers(self._wfield_objects, x_half, gap,
+                                       x_wires, wire_diam_cm,
                                        shade_insulator=(electrode != "cathode"))
             self._wfield_objects.append(h2)
 
