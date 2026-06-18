@@ -62,6 +62,7 @@
 #include "Garfield/ComponentUser.hh"
 #include "Garfield/DriftLineRKF.hh"
 #include "Garfield/FundamentalConstants.hh"
+#include "Garfield/GarfieldConstants.hh"
 #include "Garfield/MediumMagboltz.hh"
 #include "Garfield/Random.hh"
 #include "Garfield/RandomEngineRoot.hh"
@@ -100,6 +101,9 @@ struct ReadoutConfig {
   double      resistiveLayerSizeCm    = 20.0;  // square sheet side [cm]; the two grounded
                                                // edges (parallel to the wires) are this far apart
   bool        enableDelayedSignal     = true;  // if false, skip SetDelayedWeightingPotential
+  double      padAreaCm2              = 0.0;   // finite pickup-pad area used only for the
+                                               // measurement-chain capacitance model; the
+                                               // weighting field remains the infinite plane
   // Optional grounded plane below the readout pad (resistive mode only): adds a
   // pad-to-ground capacitance through a 1 mm insulator, reducing the pad signal.
   bool        groundPlaneEnabled            = false;
@@ -119,6 +123,8 @@ struct AmplifierConfig {
   double bandwidthLowHz    = 1.0e4;   // lower −3 dB edge → high-pass τ = 1/(2π f)
   double couplingCapNf     = 1.0;     // AC-coupling capacitor at the input [nF]
   double wireSeriesCapPf   = 470.0;   // extra series cap on the anode (wire) input [pF]
+  double cathodeCableCapPf = 0.0;     // extra pad-channel capacitance to ground [pF]
+  double outputSampleNs    = 0.0;     // finite acquisition aperture / boxcar average [ns]
 };
 
 struct SourceConfig {
@@ -439,6 +445,8 @@ Config LoadConfig(const fs::path& path) {
                                                       cfg.readout.resistiveLayerSizeCm);
     cfg.readout.enableDelayedSignal     = ReadBool  (*r, "readout", "enable_delayed_signal",
                                                       cfg.readout.enableDelayedSignal);
+    cfg.readout.padAreaCm2              = ReadDouble(*r, "readout", "pad_area_cm2",
+                                                      cfg.readout.padAreaCm2);
     cfg.readout.groundPlaneEnabled           = ReadBool  (*r, "readout", "ground_plane_enabled",
                                                           cfg.readout.groundPlaneEnabled);
     cfg.readout.groundPlaneInsulatorUm       = ReadDouble(*r, "readout", "ground_plane_insulator_um",
@@ -455,6 +463,10 @@ Config LoadConfig(const fs::path& path) {
     cfg.amplifier.bandwidthLowHz    = ReadDouble(*a, "amplifier", "bandwidth_low_hz",   cfg.amplifier.bandwidthLowHz);
     cfg.amplifier.couplingCapNf     = ReadDouble(*a, "amplifier", "coupling_cap_nf",    cfg.amplifier.couplingCapNf);
     cfg.amplifier.wireSeriesCapPf   = ReadDouble(*a, "amplifier", "wire_series_cap_pf", cfg.amplifier.wireSeriesCapPf);
+    cfg.amplifier.cathodeCableCapPf = ReadDouble(*a, "amplifier", "cathode_cable_cap_pf",
+                                                 cfg.amplifier.cathodeCableCapPf);
+    cfg.amplifier.outputSampleNs    = ReadDouble(*a, "amplifier", "output_sample_ns",
+                                                 cfg.amplifier.outputSampleNs);
   }
 
   if (const auto* s = FindSection(root, "source")) {
@@ -527,6 +539,8 @@ Config LoadConfig(const fs::path& path) {
         throw std::runtime_error("readout.ground_plane_insulator_um must be positive");
     }
   }
+  if (cfg.readout.padAreaCm2 < 0.)
+    throw std::runtime_error("readout.pad_area_cm2 must be >= 0");
 
   if (cfg.amplifier.enable) {
     if (cfg.amplifier.inputImpedanceOhm <= 0.)
@@ -542,6 +556,10 @@ Config LoadConfig(const fs::path& path) {
     if (cfg.amplifier.wireSeriesCapPf <= 0.)
       throw std::runtime_error("amplifier.wire_series_cap_pf must be positive");
   }
+  if (cfg.amplifier.cathodeCableCapPf < 0.)
+    throw std::runtime_error("amplifier.cathode_cable_cap_pf must be >= 0");
+  if (cfg.amplifier.outputSampleNs < 0.)
+    throw std::runtime_error("amplifier.output_sample_ns must be >= 0");
 
   if (cfg.geometry.wirePitchCm <= 0.)  throw std::runtime_error("geometry.wire_pitch_cm must be positive");
   if (cfg.geometry.wireDiamUm  <= 0.)  throw std::runtime_error("geometry.wire_diameter_um must be positive");
@@ -619,7 +637,30 @@ static void ExportGasProps(MediumMagboltz& gas, const std::string& outPath,
   std::cout << "  Gas properties exported to: " << outPath << "\n";
 }
 
-void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
+struct GasSetupResult {
+  bool ionMobilityLoaded = false;
+  std::string ionMobilityFile;
+};
+
+std::string DriftStatusToString(const int st) {
+  switch (st) {
+    case Garfield::StatusAlive: return "alive";
+    case Garfield::StatusLeftDriftArea: return "left drift area";
+    case Garfield::StatusTooManySteps: return "too many steps";
+    case Garfield::StatusCalculationAbandoned: return "calculation abandoned";
+    case Garfield::StatusLeftDriftMedium: return "left drift medium";
+    case Garfield::StatusAttached: return "attached";
+    case Garfield::StatusSharpKink: return "sharp kink";
+    case Garfield::StatusRecombined: return "recombined";
+    case Garfield::StatusHitPlane: return "hit plane";
+    case Garfield::StatusBelowTransportCut: return "below transport cut";
+    case Garfield::StatusOutsideTimeWindow: return "outside time window";
+    default: return "status " + std::to_string(st);
+  }
+}
+
+GasSetupResult SetupGas(MediumMagboltz& gas, const GasConfig& cfg,
+                        const bool requireIonMobility) {
   gas.SetTemperature(cfg.temperatureK);
   gas.SetPressure(cfg.pressureTorr);
 
@@ -664,9 +705,9 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
   // the species name is uppercased to match the filename convention.
   const char* garfieldInstall = std::getenv("GARFIELD_INSTALL");
   std::string loadedMob;   // basename recorded here for the props CSV comment
+  std::string ionUpper = cfg.ionSpecies;
+  std::transform(ionUpper.begin(), ionUpper.end(), ionUpper.begin(), ::toupper);
   if (garfieldInstall) {
-    std::string ionUpper = cfg.ionSpecies;
-    std::transform(ionUpper.begin(), ionUpper.end(), ionUpper.begin(), ::toupper);
     const std::string mobFile = std::string(garfieldInstall) +
                                 "/share/Garfield/Data/IonMobility_"
                                 + ionUpper + "+_" + ionUpper + ".txt";
@@ -682,8 +723,17 @@ void SetupGas(MediumMagboltz& gas, const GasConfig& cfg) {
     std::cerr << "  Warning: GARFIELD_INSTALL not set; ion mobility not loaded.\n";
   }
 
+  if (requireIonMobility && loadedMob.empty()) {
+    throw std::runtime_error(
+        "simulation.enable_ion_drift=true requires an ion mobility table for "
+        + ionUpper + "+. Set GARFIELD_INSTALL so Garfield++ can find "
+        + "share/Garfield/Data/IonMobility_" + ionUpper + "+_" + ionUpper
+        + ".txt, or disable simulation.enable_ion_drift.");
+  }
+
   const std::string propsFile = gasFile.substr(0, gasFile.size() - 4) + "_props.csv";
   ExportGasProps(gas, propsFile, loadedMob);
+  return {!loadedMob.empty(), loadedMob};
 }
 
 // ─── Geometry and sensor setup ────────────────────────────────────────────────
@@ -726,6 +776,14 @@ double InsulatorEpsR(const std::string& material) {
   if (material == "fr4") return 4.6;
   if (material == "air") return 1.0;
   return 3.5;  // kapton (default)
+}
+
+double ComputePadCouplingCapPf(const ReadoutConfig& ro) {
+  if (ro.type != "resistive" || ro.padAreaCm2 <= 0.) return 0.;
+  const double eps0SI = 8.854e-12;  // F/m
+  const double areaM2 = ro.padAreaCm2 * 1.e-4;
+  const double dInsM  = ro.insulatorThicknessUm * 1.e-6;
+  return eps0SI * InsulatorEpsR(ro.insulatorMaterial) * areaM2 / dInsM * 1.e12;
 }
 
 ResistiveParams ComputeResistiveParams(const ReadoutConfig& ro,
@@ -841,38 +899,74 @@ struct AmplifierParams {
   double tauHpCathodeNs;  // R_in · couplingCap                    [pad AC coupling]
   double tauHpLowNs;      // 1/(2π f_low)   — intrinsic lower band edge
   double tauLpHighNs;     // 1/(2π f_high)  — intrinsic upper band edge
+  double tauLpCathodeInputNs;  // R_in · (C_pad + C_cable)         [pad RC loading]
   double mvPerFcPerNs;    // output scale: V_out[mV] = gain·R_in·i[µA]·1e-3
+  double cathodePadCapPf;      // resistive pad ↔ sheet capacitance [pF]
+  double cathodeTotalCapPf;    // pad + cable shunt capacitance     [pF]
+  double outputSampleNs;       // finite acquisition aperture       [ns]
 };
 
-AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp) {
+AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp,
+                                       const ReadoutConfig& ro) {
   const double gain  = std::pow(10., amp.gainDb / 20.);   // dB → linear voltage gain
   const double R     = amp.inputImpedanceOhm;
   const double cCpF  = amp.couplingCapNf * 1e3;           // nF → pF
   // Wire input: extra series cap in series with the coupling cap (1/C = Σ 1/Cᵢ).
   const double cWpF  = (cCpF * amp.wireSeriesCapPf) / (cCpF + amp.wireSeriesCapPf);
+  const double cathodePadCapPf   = ComputePadCouplingCapPf(ro);
+  const double cathodeTotalCapPf = cathodePadCapPf + amp.cathodeCableCapPf;
   // τ[ns] = R[Ω]·C[F]·1e9 = R[Ω]·C[pF]·1e-3.
   const double tauHpCathodeNs = R * cCpF * 1e-3;
   const double tauHpAnodeNs   = R * cWpF * 1e-3;
   const double tauHpLowNs     = 1e9 / (2. * M_PI * amp.bandwidthLowHz);
   const double tauLpHighNs    = 1e9 / (2. * M_PI * amp.bandwidthHighHz);
+  const double tauLpCathodeInputNs = R * cathodeTotalCapPf * 1e-3;
   // i[fC/ns] ≡ i[µA]; V = gain·R·i[µA] in µV → ×1e-3 for mV.
   const double mvPerFcPerNs   = gain * R * 1e-3;
-  return {tauHpAnodeNs, tauHpCathodeNs, tauHpLowNs, tauLpHighNs, mvPerFcPerNs};
+  return {tauHpAnodeNs, tauHpCathodeNs, tauHpLowNs, tauLpHighNs,
+          tauLpCathodeInputNs, mvPerFcPerNs, cathodePadCapPf,
+          cathodeTotalCapPf, amp.outputSampleNs};
+}
+
+void ApplyBoxcarAverage(std::vector<double>& x, const double dtNs,
+                        const double windowNs) {
+  if (windowNs <= dtNs) return;
+  const std::size_t nWindow =
+      std::max<std::size_t>(1, static_cast<std::size_t>(std::llround(windowNs / dtNs)));
+  if (nWindow <= 1 || x.empty()) return;
+
+  std::vector<double> prefix(x.size() + 1, 0.);
+  for (std::size_t i = 0; i < x.size(); ++i) prefix[i + 1] = prefix[i] + x[i];
+
+  const std::size_t left  = (nWindow - 1) / 2;
+  const std::size_t right = nWindow / 2;
+  std::vector<double> y(x.size(), 0.);
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    const std::size_t lo = i > left ? i - left : 0;
+    const std::size_t hi = std::min(x.size() - 1, i + right);
+    y[i] = (prefix[hi + 1] - prefix[lo]) / static_cast<double>(hi + 1 - lo);
+  }
+  x.swap(y);
 }
 
 // Pass a binned induced current i [fC/ns ≡ µA] through the amplifier chain and
 // return the output voltage [mV].  The amplifier is linear and time-invariant, so
 // the filter order is irrelevant: upper-bandwidth low-pass, the channel's
 // AC-coupling high-pass (tauHpNs), the intrinsic lower-bandwidth high-pass, then
-// the gain·R_in scaling.
+// the gain·R_in scaling.  The cathode channel can also carry a pre-amplifier
+// input RC low-pass from the pad/cable capacitance and an optional finite
+// acquisition aperture on the output.
 std::vector<double> AmplifierOutputMv(const std::vector<double>& iFcNs,
                                       const double dtNs, const double tauHpNs,
+                                      const double tauInputLpNs,
                                       const AmplifierParams& amp) {
   std::vector<double> v(iFcNs);
+  ApplyOnePoleLowPass (v, dtNs, tauInputLpNs);
   ApplyOnePoleLowPass (v, dtNs, amp.tauLpHighNs);
   ApplyOnePoleHighPass(v, dtNs, tauHpNs);
   ApplyOnePoleHighPass(v, dtNs, amp.tauHpLowNs);
   for (auto& s : v) s *= amp.mvPerFcPerNs;
+  ApplyBoxcarAverage(v, dtNs, amp.outputSampleNs);
   return v;
 }
 
@@ -995,7 +1089,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   const double relaxTauNs = resistiveRelax
       ? ComputeResistiveParams(cfg.readout, cfg.geometry).tauNs : 0.;
   const bool amplify = cfg.amplifier.enable;
-  const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier);
+  const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier, cfg.readout);
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
   signalTree.Branch("event",             &evtId, "event/I");
@@ -1160,7 +1254,23 @@ DistanceSummary RunDistancePoint(const Config& cfg,
         int st;
         aval.GetElectronEndpoint(i, xi0, yi0, zi0, ti0, ei0,
                                     xi1, yi1, zi1, ti1, ei1, st);
-        ionDrift->DriftIon(xi0, yi0, zi0, ti0);
+        const bool ok = ionDrift->DriftIon(xi0, yi0, zi0, ti0);
+        double xe = xi0, ye = yi0, ze = zi0, te = ti0;
+        int driftStatus = Garfield::StatusCalculationAbandoned;
+        ionDrift->GetEndPoint(xe, ye, ze, te, driftStatus);
+        if (!ok) {
+          std::ostringstream msg;
+          msg << "Ion drift failed for event " << ev
+              << ", source distance " << distLabel
+              << ", ion " << i << "/" << nEp
+              << " from (" << xi0 << ", " << yi0 << ", " << zi0 << ") cm"
+              << " at t=" << ti0 << " ns; end status "
+              << DriftStatusToString(driftStatus) << " (" << driftStatus << "). "
+              << "This run is not trustworthy. Ensure GARFIELD_INSTALL exposes "
+              << "an ion mobility table for " << cfg.gas.ionSpecies
+              << "+ or disable simulation.enable_ion_drift.";
+          throw std::runtime_error(msg.str());
+        }
 
         if (i < kMaxDispIonPaths) {
           const std::size_t nPts = ionDrift->GetNumberOfDriftLinePoints();
@@ -1212,8 +1322,10 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     if (amplify) {
       // Front-end amplifier acts on the current that reaches it: the raw wire
       // current and the post-relaxation pad current.  Output is voltage [mV].
-      bufAamp = AmplifierOutputMv(bufA, sim.timeStepNs, ampPar.tauHpAnodeNs,   ampPar);
-      bufCamp = AmplifierOutputMv(bufC, sim.timeStepNs, ampPar.tauHpCathodeNs, ampPar);
+      bufAamp = AmplifierOutputMv(bufA, sim.timeStepNs, ampPar.tauHpAnodeNs,
+                                  /*tauInputLpNs=*/0., ampPar);
+      bufCamp = AmplifierOutputMv(bufC, sim.timeStepNs, ampPar.tauHpCathodeNs,
+                                  ampPar.tauLpCathodeInputNs, ampPar);
     }
 
     double rawAnode = 0., rawCathode = 0., rawCathodeTop = 0.;
@@ -1439,7 +1551,9 @@ json ConfigToJson(const Config& cfg) {
       {"insulator_material",         cfg.readout.insulatorMaterial},
       {"insulator_thickness_um",     cfg.readout.insulatorThicknessUm},
       {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq},
+      {"resistive_layer_size_cm",    cfg.readout.resistiveLayerSizeCm},
       {"enable_delayed_signal",      cfg.readout.enableDelayedSignal},
+      {"pad_area_cm2",               cfg.readout.padAreaCm2},
       {"ground_plane_enabled",             cfg.readout.groundPlaneEnabled},
       {"ground_plane_insulator_um",        cfg.readout.groundPlaneInsulatorUm},
       {"ground_plane_insulator_material",  cfg.readout.groundPlaneInsulatorMaterial}
@@ -1451,7 +1565,9 @@ json ConfigToJson(const Config& cfg) {
       {"bandwidth_high_hz",   cfg.amplifier.bandwidthHighHz},
       {"bandwidth_low_hz",    cfg.amplifier.bandwidthLowHz},
       {"coupling_cap_nf",     cfg.amplifier.couplingCapNf},
-      {"wire_series_cap_pf",  cfg.amplifier.wireSeriesCapPf}
+      {"wire_series_cap_pf",  cfg.amplifier.wireSeriesCapPf},
+      {"cathode_cable_cap_pf", cfg.amplifier.cathodeCableCapPf},
+      {"output_sample_ns",     cfg.amplifier.outputSampleNs}
     }},
     {"source", jSrc},
     {"gas", {
@@ -1585,7 +1701,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\nSetting up gas...\n";
     MediumMagboltz gas(cfg.gas.gas1, cfg.gas.frac1,
                        cfg.gas.gas2, 100. - cfg.gas.frac1);
-    SetupGas(gas, cfg.gas);
+    SetupGas(gas, cfg.gas, cfg.simulation.enableIonDrift);
 
     // Geometry and sensor are shared across all distance points
     ComponentAnalyticField cmp;
@@ -1603,14 +1719,29 @@ int main(int argc, char* argv[]) {
     }
 
     if (cfg.amplifier.enable) {
-      const AmplifierParams ap = ComputeAmplifierParams(cfg.amplifier);
+      const AmplifierParams ap = ComputeAmplifierParams(cfg.amplifier, cfg.readout);
       std::cout << "  Amplifier: " << cfg.amplifier.gainDb << " dB, "
                 << cfg.amplifier.bandwidthLowHz / 1e3 << " kHz – "
                 << cfg.amplifier.bandwidthHighHz / 1e9 << " GHz, "
                 << cfg.amplifier.inputImpedanceOhm << " Ω in; AC-coupling τ: wire "
                 << ap.tauHpAnodeNs << " ns (+" << cfg.amplifier.wireSeriesCapPf
                 << " pF), pad " << ap.tauHpCathodeNs << " ns; output "
-                << ap.mvPerFcPerNs << " mV per fC/ns\n";
+                << ap.mvPerFcPerNs << " mV per fC/ns";
+      if (ap.cathodeTotalCapPf > 0.) {
+        std::cout << "; cathode input RC τ " << ap.tauLpCathodeInputNs << " ns ("
+                  << ap.cathodeTotalCapPf << " pF";
+        if (ap.cathodePadCapPf > 0.) {
+          std::cout << " = " << ap.cathodePadCapPf << " pF pad";
+          if (cfg.amplifier.cathodeCableCapPf > 0.) {
+            std::cout << " + " << cfg.amplifier.cathodeCableCapPf << " pF cable";
+          }
+        }
+        std::cout << ")";
+      }
+      if (cfg.amplifier.outputSampleNs > 0.) {
+        std::cout << "; output sample " << cfg.amplifier.outputSampleNs << " ns";
+      }
+      std::cout << "\n";
     }
 
     Sensor sensor;

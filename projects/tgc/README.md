@@ -346,6 +346,14 @@ amplifier output still shows the spike on both channels.  The absence of the spi
 in measured data therefore comes from elsewhere (input loading, grounding, the
 actual ρ_s) — see *Why the electron spike appears on the simulated cathode* above.
 
+To model that "elsewhere", the cathode channel now supports two optional
+measurement-chain terms without changing the Garfield weighting field itself:
+`readout.pad_area_cm2` adds the resistive-layer ↔ pad capacitance implied by the
+real pickup area, and `amplifier.cathode_cable_cap_pf` adds lumped cable/scope
+capacitance.  Together they create a cathode-side input RC low-pass before the
+current amplifier.  `amplifier.output_sample_ns` then applies a boxcar average
+to mimic the finite acquisition aperture of the digitizer.
+
 ---
 
 ## Gas file
@@ -430,6 +438,13 @@ cmake --build build -j4
 # All options:
 ./build/tgc_sim --help
 ```
+
+When `simulation.enable_ion_drift = true` (the default), the binary now **fails
+fast** unless Garfield++ can load an ion-mobility table for `gas.ion_species`
+via `GARFIELD_INSTALL`.  This avoids silently producing electron-dominated pad
+waveforms after `DriftLineRKF` transport failures.  In this workspace, sourcing
+`../../local/garfield/share/Garfield/setupGarfield.sh` before running the binary
+is the simplest way to provide the required runtime environment.
 
 The smoke CTest validates the build without generating a gas file from scratch.
 Two smoke configs are provided: `smoke_tgc_2.json` (ncoll=2, fastest) and
@@ -562,6 +577,8 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_material`           | string | —     | `"kapton"`      | Insulating substrate material. Sets the relative permittivity used for the dielectric correction and τ calculation. `"kapton"` → ε_r = 3.5; `"fr4"` → ε_r = 4.6. Ignored when `type = "conductive"` |
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
+| `resistive_layer_size_cm`      | float  | cm    | 20.0            | Across-wire size of the square resistive sheet. The two grounded edges parallel to the wires are this far apart, so it sets the relaxation time `τ ∝ size²`. Ignored when `type = "conductive"` |
+| `pad_area_cm2`                 | float  | cm²   | 0.0             | Finite pickup-pad area used **only** for the downstream pad/cable RC model in the amplifier stage. It does **not** change the Garfield weighting field, which remains the infinite cathode plane; use a boundary-element/FEM solve for true finite-pad induction |
 | `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
 | `ground_plane_enabled`         | bool   | —     | `false`         | Add a grounded plane below the readout pad (resistive only). It adds a pad-to-ground capacitance `C_gnd` that lowers the weighting-potential factor α (`α = C_ins/(C_ins+C_gap+C_gnd)`), reducing the pad signal. Does not change the DC field or τ. No effect when `type = "conductive"` (the solid grounded cathode shields it — a note is printed) |
 | `ground_plane_insulator_um`    | float  | μm    | 1000.0          | Thickness of the pad ↔ ground-plane insulator (default 1 mm). Used only when `ground_plane_enabled` |
@@ -581,6 +598,8 @@ Physics § 5. All keys are ignored when `enable = false`.
 | `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | Lower −3 dB band edge → high-pass τ = 1/(2π·f) ≈ 15.9 µs. Slow baseline droop, visible only in long time windows |
 | `coupling_cap_nf`      | float  | nF   | 1.0          | AC-coupling capacitor at the input. With R_in sets the pad high-pass τ (1 nF, 50 Ω → 50 ns) |
 | `wire_series_cap_pf`   | float  | pF   | 470.0        | Extra series capacitor on the **anode (wire)** input only; in series with the coupling cap (470 pF ⊕ 1 nF = 320 pF) it gives the wire channel a shorter high-pass τ ≈ 16 ns |
+| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with `readout.pad_area_cm2` it creates a cathode-side input low-pass that can strongly suppress the prompt pad spike |
+| `output_sample_ns`     | float  | ns   | 0.0          | Finite acquisition aperture applied as a boxcar average on the amplifier output. Use this to mimic digitizer sampling that further averages down sub-ns features after the analog front end |
 
 ### `source`
 
@@ -616,7 +635,7 @@ Physics § 5. All keys are ignored when `enable = false`.
 | `max_avalanche_size` | int   | —    | 500000   | Maximum number of electrons tracked per `AvalancheMicroscopic` call. Truncates runaway avalanches to prevent excessive CPU use. Reduce to ~10 000 for fast exploratory runs (biases the high-gain tail). Note: each avalanche electron corresponds to one `DriftLineRKF::DriftIon` call, so smaller values also reduce ion-drift CPU cost |
 | `time_window_ns`     | float | ns   | 40000.0  | Duration of the induced-current waveform recorded on each electrode. The shipped default of 40 μs captures the full ion drift (~5–8 μs). Use ~300 ns for electron-signal-only studies: 300 ns captures the full electron component (≲20 ns) and the first ~34 % of the slow ion tail |
 | `time_step_ns`       | float | ns   | 0.5      | Width of each time bin in the `TProfile` waveforms (`p_anode_signal`, `p_cathode_signal`). Finer bins give better time resolution but larger ROOT histograms. 0.5 ns is sufficient to resolve the fast electron peak (~5–10 ns FWHM) |
-| `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
+| `enable_ion_drift`   | bool  | —    | true     | Drift positive ions after each electron avalanche using `DriftLineRKF`. When enabled, every ion created during the avalanche is transported to a cathode and its Ramo-theorem induced current is added to the waveform. The run now aborts if Garfield++ cannot load the requested ion-mobility table or if any ion drift fails, because the resulting waveform would otherwise be spuriously electron-dominated. Disabling skips ion signal computation entirely, greatly reducing CPU time for large avalanches at the cost of losing the cathode signal and ion tail |
 | `store_drift_lines`  | bool  | —    | true     | When `true`, `AvalancheMicroscopic` records every intermediate collision step in the primary electron drift line (not just start and end), producing denser 3D path data for the GUI 3D Tracks viewer at the cost of larger ROOT files |
 | `ion_max_step_um`    | float | μm   | 5.0      | Cap on the `DriftLineRKF` integration step.  The stepper's steps otherwise grow geometrically (×10 per step) and the induced current is sampled only at drift-line points, so an uncapped surface-born ion's ~10 μm step spans ~5–8 ns right where i(t) varies fastest — producing an artificial flat shelf with a sharp kink ~8 ns after the electron spike.  5 μm resolves the early ion signal to ~1–2 ns at roughly 5× the ion-drift CPU; `0` disables the cap |
 | `random_seed`        | int   | —    | 0        | Seed for the random-number generators.  Seeds **both** ROOT's `gRandom` (which drives source-position sampling) and Garfield's own transport engine (the `TRandom3` behind `AvalancheMicroscopic` / `DriftLineRKF`, installed via `Garfield::Random::SetEngine`) — both are required for reproducibility, since Garfield does not draw from `gRandom`.  `0` (default) self-seeds both randomly each run; any positive integer fixes the avalanche, ion-drift, and source-position sequence so runs are bit-for-bit reproducible — useful for A/B comparisons and debugging |

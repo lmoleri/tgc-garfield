@@ -256,6 +256,12 @@ class ConfigPanel(QScrollArea):
             "wires, so charge relaxes across the wire array over this span — this sets the\n"
             "relaxation time constant τ (τ ∝ size²)."
         )
+        self.pad_area = self._dspin(0.0, 1000.0, 0.5, 2, 0.0)
+        self.pad_area.setToolTip(
+            "Pickup-pad area [cm²] used only for the pad/cable RC loading model.\n"
+            "It does not change the Garfield weighting field, which remains the\n"
+            "infinite cathode plane."
+        )
 
         self.delayed_signal_cb = QCheckBox()
         self.delayed_signal_cb.setChecked(True)
@@ -290,6 +296,7 @@ class ConfigPanel(QScrollArea):
         ro_form.addRow("Thickness [μm]",         self.insulator_thickness)
         ro_form.addRow("Resistivity [kΩ/sq]",    self.surface_resistivity)
         ro_form.addRow("Resistive layer [cm]",   self.resistive_layer_size)
+        ro_form.addRow("Pad area [cm²]",         self.pad_area)
         ro_form.addRow("Delayed signal",         self.delayed_signal_cb)
         ro_form.addRow("Ground plane below pad", self.ground_plane_cb)
         ro_form.addRow("  Ground gap [μm]",      self.ground_plane_thickness)
@@ -328,6 +335,16 @@ class ConfigPanel(QScrollArea):
             "Extra series capacitor on the anode (wire) input [pF]; in series with\n"
             "the coupling cap it sets a shorter high-pass τ on the wire channel."
         )
+        self.amp_cathode_cable = self._dspin(0.0, 100000.0, 1.0, 1, 0.0)
+        self.amp_cathode_cable.setToolTip(
+            "Extra cathode-channel capacitance to ground [pF] from cable, connectors,\n"
+            "scope input, etc. Combined with the pad area it creates a pad-side input RC."
+        )
+        self.amp_sample_ns = self._dspin(0.0, 100000.0, 0.5, 2, 0.0)
+        self.amp_sample_ns.setToolTip(
+            "Finite acquisition aperture / boxcar averaging on the amplifier output [ns].\n"
+            "Use this to mimic digitizer sampling that smears a sub-ns spike."
+        )
 
         amp_form.addRow("Enable",                self.amp_enable)
         amp_form.addRow("Gain [dB]",             self.amp_gain)
@@ -336,6 +353,8 @@ class ConfigPanel(QScrollArea):
         amp_form.addRow("Lower bandwidth [kHz]", self.amp_bw_low)
         amp_form.addRow("Coupling cap [nF]",     self.amp_coupling)
         amp_form.addRow("Wire series cap [pF]",  self.amp_wire_cap)
+        amp_form.addRow("Cathode cable cap [pF]", self.amp_cathode_cable)
+        amp_form.addRow("Output sample [ns]",     self.amp_sample_ns)
         root_layout.addWidget(amp_box)
 
         self._update_amplifier_widgets()
@@ -655,6 +674,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_thickness.setEnabled(resistive)
         self.surface_resistivity.setEnabled(resistive)
         self.resistive_layer_size.setEnabled(resistive)
+        self.pad_area.setEnabled(resistive)
         self.delayed_signal_cb.setEnabled(resistive)
         self.ground_plane_cb.setEnabled(resistive)
         gp = resistive and self.ground_plane_cb.isChecked()
@@ -664,7 +684,8 @@ class ConfigPanel(QScrollArea):
     def _update_amplifier_widgets(self):
         on = self.amp_enable.isChecked()
         for w in (self.amp_gain, self.amp_zin, self.amp_bw_high,
-                  self.amp_bw_low, self.amp_coupling, self.amp_wire_cap):
+                  self.amp_bw_low, self.amp_coupling, self.amp_wire_cap,
+                  self.amp_cathode_cable, self.amp_sample_ns):
             w.setEnabled(on)
 
     # ── file dialogs ─────────────────────────────────────────────────────
@@ -729,6 +750,7 @@ class ConfigPanel(QScrollArea):
                 "insulator_thickness_um":     self.insulator_thickness.value(),
                 "surface_resistivity_ohm_sq": self.surface_resistivity.value() * 1000.0,
                 "resistive_layer_size_cm":    self.resistive_layer_size.value(),
+                "pad_area_cm2":               self.pad_area.value(),
                 "enable_delayed_signal":      self.delayed_signal_cb.isChecked(),
                 "ground_plane_enabled":            self.ground_plane_cb.isChecked(),
                 "ground_plane_insulator_um":       self.ground_plane_thickness.value(),
@@ -742,6 +764,8 @@ class ConfigPanel(QScrollArea):
                 "bandwidth_low_hz":    self.amp_bw_low.value() * 1e3,    # kHz → Hz
                 "coupling_cap_nf":     self.amp_coupling.value(),
                 "wire_series_cap_pf":  self.amp_wire_cap.value(),
+                "cathode_cable_cap_pf": self.amp_cathode_cable.value(),
+                "output_sample_ns":     self.amp_sample_ns.value(),
             },
             "source": {
                 "energy_keV":          self.energy_kev.value(),
@@ -799,6 +823,7 @@ class ConfigPanel(QScrollArea):
         self.insulator_thickness.setValue(ro.get("insulator_thickness_um", 100.0))
         self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
         self.resistive_layer_size.setValue(ro.get("resistive_layer_size_cm", 20.0))
+        self.pad_area.setValue(ro.get("pad_area_cm2", 0.0))
         self.delayed_signal_cb.setChecked(ro.get("enable_delayed_signal", True))
         self.ground_plane_cb.setChecked(bool(ro.get("ground_plane_enabled", False)))
         self.ground_plane_thickness.setValue(ro.get("ground_plane_insulator_um", 1000.0))
@@ -815,6 +840,8 @@ class ConfigPanel(QScrollArea):
         self.amp_bw_low.setValue(  amp.get("bandwidth_low_hz", 1e4) / 1e3)    # Hz → kHz
         self.amp_coupling.setValue(amp.get("coupling_cap_nf", 1.0))
         self.amp_wire_cap.setValue(amp.get("wire_series_cap_pf", 470.0))
+        self.amp_cathode_cable.setValue(amp.get("cathode_cable_cap_pf", 0.0))
+        self.amp_sample_ns.setValue(    amp.get("output_sample_ns", 0.0))
         self._update_amplifier_widgets()
 
         s = d.get("source", {})
