@@ -66,6 +66,8 @@ and the cathode signal shape are modified.
   y = −gap     ── resistive layer (20 cm, ρ_s [Ω/sq], ∥-wire edges grounded) ──
                ███████  insulator (Kapton/FR4, thickness d)  ███████
   y = −gap−d   ──────────── conductive readout pad (current size) ───────────
+               ▒▒▒▒▒▒▒  insulator (1 mm FR4)  ▒▒▒▒▒▒▒   ← optional, ground_plane_enabled
+  y = −gap−d−1mm ──────────────── ground plane ──────────────────────────────
 ```
 
 The resistive layer is a square sheet (default 20 × 20 cm, `resistive_layer_size_cm`)
@@ -74,6 +76,11 @@ keeps its usual (smaller) size.  Because only those two edges are grounded, depo
 relaxes *across* the wire array toward them, and the local surface potential decays with time
 constant τ = ε₀ ε_r ρ_s L²/(π² d), where L = `resistive_layer_size_cm` / 2 (half the
 across-wire span between the grounded edges).
+
+Optionally (`ground_plane_enabled`) a **grounded plane** sits a further 1 mm (FR4) below the
+readout pad.  It adds a pad-to-ground capacitance that reduces the pad signal (see Physics
+§4 below); it does not change the DC drift field or τ, and has no effect in conductive
+readout (a solid grounded cathode fully shields it).
 
 | Parameter         | Value        | Notes                               |
 |-------------------|--------------|-------------------------------------|
@@ -201,6 +208,40 @@ Two corrections apply when `readout.type = "resistive"`:
    (An earlier version used a 1-D linear W(y) that ignored wire screening; it
    overstated the prompt electron spike and the top-going-ion contribution on
    the pad.)
+
+   Equivalently α is a capacitive divider, α = C_ins / (C_ins + C_gap), with
+   C_ins = ε₀ε_r/d (pad ↔ resistive layer) and C_gap = ε₀/gap (pad ↔ gas
+   return).  When `ground_plane_enabled`, a grounded plane d₂ below the pad adds
+   a third arm C_gnd = ε₀ε_r2/d₂ (pad ↔ ground) in parallel with the gas return:
+
+   > α = C_ins / (C_ins + C_gap + C_gnd)
+
+   so the backplane reduces the pad signal.  For the defaults (Kapton upper
+   insulator, 1 mm FR4 below) α drops 0.98 → ≈ 0.87 (pad signal −11 %); a 1 mm
+   *air* gap gives ≈ 0.95.  τ and the DC field are unchanged (the 1 mm backplane
+   is too far to alter the sheet's relaxation capacitance, and the grounded
+   cathode shields it from the gas), and the option has no effect in conductive
+   readout.
+
+   **Accuracy and validity of the α model.**  The α factor is the analytic
+   *dielectric-transparency* approximation: it assumes the field is uniform across
+   the gas/insulator interface, so the gas weighting potential keeps its exact
+   wire-screened shape and is merely rescaled by the scalar α.  Only that scalar is
+   approximate — and it is a good approximation here: the wire-induced ripple has
+   decayed to ~exp(−2π·gap/pitch) ≈ 0.7 % by the time it reaches the interface
+   (a full gap below the wires), so α·W_cathode is accurate to **~1 % for the
+   default geometry**.  The error grows with d/gap and with ε_r.  Crucially, the
+   weighting field is only ever evaluated at charge positions **inside the gas** —
+   the gas medium is bounded by the analytic cathode plane at y = −gap, so every
+   electron and ion is absorbed at the resistive layer and none enter the insulator
+   (`ComponentAnalyticField` returns no medium behind the plane; the microscopic
+   avalanche and the RKF ion drift terminate there).  The insulator's internal
+   weighting potential therefore never enters the induced-signal calculation; the
+   GUI **Weighting Field** tab fills it in (the α→1 ramp up to the pad) for
+   visualisation only.  A fully rigorous layered solve — for thick-insulator or
+   high-ε_r regimes where the ~1 % no longer holds — would require a 2-D boundary
+   element model of the wires + dielectric + pad (Garfield `ComponentNeBem2d`) or an
+   external FEM solution imported via `ComponentElmer` / `ComponentComsol`.
 
 2. **Delayed signal** — the deposited surface charge remains at its landing
    point but the grounded edges pull the local resistive-layer potential toward
@@ -522,6 +563,9 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
 | `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
+| `ground_plane_enabled`         | bool   | —     | `false`         | Add a grounded plane below the readout pad (resistive only). It adds a pad-to-ground capacitance `C_gnd` that lowers the weighting-potential factor α (`α = C_ins/(C_ins+C_gap+C_gnd)`), reducing the pad signal. Does not change the DC field or τ. No effect when `type = "conductive"` (the solid grounded cathode shields it — a note is printed) |
+| `ground_plane_insulator_um`    | float  | μm    | 1000.0          | Thickness of the pad ↔ ground-plane insulator (default 1 mm). Used only when `ground_plane_enabled` |
+| `ground_plane_insulator_material` | string | —  | `"fr4"`         | Dielectric of the pad ↔ ground-plane gap: `"kapton"` (ε_r=3.5), `"fr4"` (ε_r=4.6), or `"air"` (ε_r=1.0). Sets `C_gnd`, hence the signal reduction. Used only when `ground_plane_enabled` |
 
 ### `amplifier`
 

@@ -13,7 +13,10 @@
     "insulator_thickness_um": 100.0,
     "surface_resistivity_ohm_sq": 500000.0,
     "resistive_layer_size_cm": 20.0,
-    "enable_delayed_signal": true
+    "enable_delayed_signal": true,
+    "ground_plane_enabled": false,
+    "ground_plane_insulator_um": 1000.0,
+    "ground_plane_insulator_material": "fr4"
   },
   "amplifier": {
     "enable": false,

@@ -253,16 +253,39 @@ class ConfigPanel(QScrollArea):
             "potential is used (no relaxation tail)."
         )
 
+        self.ground_plane_cb = QCheckBox()
+        self.ground_plane_cb.setChecked(False)
+        self.ground_plane_cb.setToolTip(
+            "Add a grounded plane below the readout pad, separated by the insulator\n"
+            "below. It adds a pad-to-ground capacitance that reduces the pad signal\n"
+            "(scales the weighting-potential factor α). Resistive readout only —\n"
+            "in conductive mode the solid grounded cathode shields the backplane."
+        )
+        self.ground_plane_thickness = self._dspin(1.0, 100000.0, 100.0, 1, 1000.0)
+        self.ground_plane_thickness.setToolTip(
+            "Pad ↔ ground-plane insulator thickness [μm] (default 1000 = 1 mm)."
+        )
+        self.ground_plane_material = QComboBox()
+        self.ground_plane_material.addItems(["Kapton", "FR4", "Air"])
+        self.ground_plane_material.setCurrentText("FR4")
+        self.ground_plane_material.setToolTip(
+            "Dielectric of the pad ↔ ground-plane gap (sets C_gnd, hence the signal drop)."
+        )
+
         ro_form.addRow("Type",                   self.readout_type)
         ro_form.addRow("Insulator material",     self.insulator_material)
         ro_form.addRow("Thickness [μm]",         self.insulator_thickness)
         ro_form.addRow("Resistivity [kΩ/sq]",    self.surface_resistivity)
         ro_form.addRow("Resistive layer [cm]",   self.resistive_layer_size)
         ro_form.addRow("Delayed signal",         self.delayed_signal_cb)
+        ro_form.addRow("Ground plane below pad", self.ground_plane_cb)
+        ro_form.addRow("  Ground gap [μm]",      self.ground_plane_thickness)
+        ro_form.addRow("  Ground gap material",  self.ground_plane_material)
         root_layout.addWidget(ro_box)
 
         self._update_readout_widgets()
         self.readout_type.currentIndexChanged.connect(self._update_readout_widgets)
+        self.ground_plane_cb.toggled.connect(self._update_readout_widgets)
 
         # ── Amplifier (CIVIDEC C2-TCT front end) ──────────────────────────
         amp_box  = QGroupBox("Amplifier")
@@ -620,6 +643,10 @@ class ConfigPanel(QScrollArea):
         self.surface_resistivity.setEnabled(resistive)
         self.resistive_layer_size.setEnabled(resistive)
         self.delayed_signal_cb.setEnabled(resistive)
+        self.ground_plane_cb.setEnabled(resistive)
+        gp = resistive and self.ground_plane_cb.isChecked()
+        self.ground_plane_thickness.setEnabled(gp)
+        self.ground_plane_material.setEnabled(gp)
 
     def _update_amplifier_widgets(self):
         on = self.amp_enable.isChecked()
@@ -690,6 +717,9 @@ class ConfigPanel(QScrollArea):
                 "surface_resistivity_ohm_sq": self.surface_resistivity.value() * 1000.0,
                 "resistive_layer_size_cm":    self.resistive_layer_size.value(),
                 "enable_delayed_signal":      self.delayed_signal_cb.isChecked(),
+                "ground_plane_enabled":            self.ground_plane_cb.isChecked(),
+                "ground_plane_insulator_um":       self.ground_plane_thickness.value(),
+                "ground_plane_insulator_material": self.ground_plane_material.currentText().lower(),
             },
             "amplifier": {
                 "enable":              self.amp_enable.isChecked(),
@@ -757,6 +787,12 @@ class ConfigPanel(QScrollArea):
         self.surface_resistivity.setValue(ro.get("surface_resistivity_ohm_sq", 500000.0) / 1000.0)
         self.resistive_layer_size.setValue(ro.get("resistive_layer_size_cm", 20.0))
         self.delayed_signal_cb.setChecked(ro.get("enable_delayed_signal", True))
+        self.ground_plane_cb.setChecked(bool(ro.get("ground_plane_enabled", False)))
+        self.ground_plane_thickness.setValue(ro.get("ground_plane_insulator_um", 1000.0))
+        _gp_disp = {"kapton": "Kapton", "fr4": "FR4", "air": "Air"}
+        self.ground_plane_material.setCurrentText(
+            _gp_disp.get(ro.get("ground_plane_insulator_material", "fr4").lower(), "FR4"))
+        self._update_readout_widgets()
 
         amp = d.get("amplifier", {})
         self.amp_enable.setChecked(bool(amp.get("enable", False)))

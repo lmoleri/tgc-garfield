@@ -100,6 +100,11 @@ struct ReadoutConfig {
   double      resistiveLayerSizeCm    = 20.0;  // square sheet side [cm]; the two grounded
                                                // edges (parallel to the wires) are this far apart
   bool        enableDelayedSignal     = true;  // if false, skip SetDelayedWeightingPotential
+  // Optional grounded plane below the readout pad (resistive mode only): adds a
+  // pad-to-ground capacitance through a 1 mm insulator, reducing the pad signal.
+  bool        groundPlaneEnabled            = false;
+  double      groundPlaneInsulatorUm        = 1000.0;   // pad ↔ ground-plane gap [µm]
+  std::string groundPlaneInsulatorMaterial  = "fr4";    // "kapton" | "fr4" | "air"
 };
 
 // Front-end electronics: the CIVIDEC C2-TCT broadband current amplifier.
@@ -434,6 +439,12 @@ Config LoadConfig(const fs::path& path) {
                                                       cfg.readout.resistiveLayerSizeCm);
     cfg.readout.enableDelayedSignal     = ReadBool  (*r, "readout", "enable_delayed_signal",
                                                       cfg.readout.enableDelayedSignal);
+    cfg.readout.groundPlaneEnabled           = ReadBool  (*r, "readout", "ground_plane_enabled",
+                                                          cfg.readout.groundPlaneEnabled);
+    cfg.readout.groundPlaneInsulatorUm       = ReadDouble(*r, "readout", "ground_plane_insulator_um",
+                                                          cfg.readout.groundPlaneInsulatorUm);
+    cfg.readout.groundPlaneInsulatorMaterial = ReadString(*r, "readout", "ground_plane_insulator_material",
+                                                          cfg.readout.groundPlaneInsulatorMaterial);
   }
 
   if (const auto* a = FindSection(root, "amplifier")) {
@@ -508,6 +519,13 @@ Config LoadConfig(const fs::path& path) {
       throw std::runtime_error("readout.surface_resistivity_ohm_sq must be positive");
     if (cfg.readout.resistiveLayerSizeCm <= 0.)
       throw std::runtime_error("readout.resistive_layer_size_cm must be positive");
+    if (cfg.readout.groundPlaneEnabled) {
+      const auto& m = cfg.readout.groundPlaneInsulatorMaterial;
+      if (m != "kapton" && m != "fr4" && m != "air")
+        throw std::runtime_error("readout.ground_plane_insulator_material must be 'kapton', 'fr4' or 'air'");
+      if (cfg.readout.groundPlaneInsulatorUm <= 0.)
+        throw std::runtime_error("readout.ground_plane_insulator_um must be positive");
+    }
   }
 
   if (cfg.amplifier.enable) {
@@ -703,15 +721,38 @@ struct ResistiveParams {
   double tauNs;  // surface-potential relaxation time constant [ns]
 };
 
+// Relative permittivity of a named insulator material.
+double InsulatorEpsR(const std::string& material) {
+  if (material == "fr4") return 4.6;
+  if (material == "air") return 1.0;
+  return 3.5;  // kapton (default)
+}
+
 ResistiveParams ComputeResistiveParams(const ReadoutConfig& ro,
                                        const GeometryConfig& geom) {
-  const double epsR   = (ro.insulatorMaterial == "fr4") ? 4.6 : 3.5;
+  const double epsR   = InsulatorEpsR(ro.insulatorMaterial);
   const double dInsCm = ro.insulatorThicknessUm * 1e-4;        // μm → cm
-  const double alpha  = epsR * geom.gapCm / (dInsCm + epsR * geom.gapCm);
+
+  // Prompt-signal capacitive divider (per ε₀·area): the floating pad reads the
+  // cathode-plane weighting potential reduced by C_ins/(C_ins + C_gap + C_gnd).
+  //   C_ins = ε_r/d_ins  : pad ↔ resistive layer (upper insulator)
+  //   C_gap = 1/gap      : pad ↔ gas-gap return
+  //   C_gnd = ε_r2/d2    : pad ↔ grounded plane below (1 mm insulator), if present
+  // With no ground plane this is identical to ε_r·gap/(d_ins + ε_r·gap).
+  const double cIns = epsR / dInsCm;
+  const double cGap = 1.0 / geom.gapCm;
+  double cGnd = 0.;
+  if (ro.groundPlaneEnabled) {
+    cGnd = InsulatorEpsR(ro.groundPlaneInsulatorMaterial)
+           / (ro.groundPlaneInsulatorUm * 1e-4);                // μm → cm
+  }
+  const double alpha = cIns / (cIns + cGap + cGnd);
 
   // τ = ε₀ ε_r ρ_s L² / (π² d_ins).
   // The resistive sheet is grounded on its two edges parallel to the wires, separated by
-  // resistiveLayerSizeCm across the wire direction; L = half that span.
+  // resistiveLayerSizeCm across the wire direction; L = half that span.  τ is unchanged by
+  // the ground plane: the sheet's relaxation capacitance is dominated by the thin upper
+  // insulator to the pad; the 1 mm backplane is too far to change it.
   const double eps0SI = 8.854e-12;                              // F/m
   const double dInsM  = ro.insulatorThicknessUm * 1e-6;        // μm → m
   const double L_m    = ro.resistiveLayerSizeCm * 0.5e-2;       // cm → m
@@ -745,6 +786,11 @@ void SetupResistiveReadout(ComponentUser& cmp, ComponentAnalyticField& fieldCmp,
             << ", τ = " << tauNs << " ns"
             << " (" << ro.resistiveLayerSizeCm << " cm layer, 2-edge ground)"
             << ", wire-screened analytic weighting potential"
+            << (ro.groundPlaneEnabled
+                  ? (", + ground plane ("
+                     + std::to_string(static_cast<int>(ro.groundPlaneInsulatorUm))
+                     + " µm " + ro.groundPlaneInsulatorMaterial + ")")
+                  : std::string())
             << (ro.enableDelayedSignal ? ", relaxation applied as post-filter"
                                        : " (relaxation disabled)")
             << "\n";
@@ -1393,7 +1439,10 @@ json ConfigToJson(const Config& cfg) {
       {"insulator_material",         cfg.readout.insulatorMaterial},
       {"insulator_thickness_um",     cfg.readout.insulatorThicknessUm},
       {"surface_resistivity_ohm_sq", cfg.readout.surfaceResistivityOhmSq},
-      {"enable_delayed_signal",      cfg.readout.enableDelayedSignal}
+      {"enable_delayed_signal",      cfg.readout.enableDelayedSignal},
+      {"ground_plane_enabled",             cfg.readout.groundPlaneEnabled},
+      {"ground_plane_insulator_um",        cfg.readout.groundPlaneInsulatorUm},
+      {"ground_plane_insulator_material",  cfg.readout.groundPlaneInsulatorMaterial}
     }},
     {"amplifier", {
       {"enable",              cfg.amplifier.enable},
@@ -1548,6 +1597,9 @@ int main(int argc, char* argv[]) {
     if (cfg.readout.type == "resistive") {
       std::cout << "\nSetting up resistive readout...\n";
       SetupResistiveReadout(cmpReadout, cmp, cfg.readout, cfg.geometry);
+    } else if (cfg.readout.groundPlaneEnabled) {
+      std::cout << "  Note: ground_plane_enabled has no effect in conductive readout "
+                   "(the solid grounded cathode shields the backplane).\n";
     }
 
     if (cfg.amplifier.enable) {
