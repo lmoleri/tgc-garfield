@@ -966,6 +966,8 @@ class ResultsPanel(QTabWidget):
 
         # ── Waveforms tab: ROOT TCanvas browser ──────────────────────────
         self._waveform_data: dict = {}
+        # Keeps the per-canvas TPyDispatcher objects (Closed() → null the ref) alive.
+        self._canvas_dispatchers: dict = {}
         self._root_canvas  = None    # ROOT TCanvas (kept alive between events)
         self._root_objects: list = []  # TGraph/TLegend objects (prevent Python GC)
         self._charge_canvas  = None   # ROOT TCanvas for charge integrals
@@ -1589,10 +1591,9 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if self._root_canvas_alive(self._gas_canvas, "tgc_magboltz"):
-                self._gas_canvas.Close()
-            self._gas_canvas = ROOT.TCanvas(
-                "tgc_magboltz", "Magboltz Gas Properties", 1200, 900)
+            self._gas_canvas = self._ensure_canvas(
+                "_gas_canvas", "tgc_magboltz", "Magboltz Gas Properties", 1200, 900)
+            self._gas_canvas.Clear()
             self._gas_canvas.Divide(3, 3)
             self._gas_objects.clear()
             ROOT.TGaxis.SetMaxDigits(0)   # force scientific notation for all values < 1
@@ -1801,9 +1802,7 @@ class ResultsPanel(QTabWidget):
                 (self._efield_root_canvas, "efield"),
                 (self._wfield_root_canvas, "wfield"),
             ]:
-                if canvas is None:
-                    continue
-                if not self._root_canvas_alive(canvas, canvas.GetName()):
+                if canvas is None:        # closed canvases have a None ref
                     continue
                 tf.cd()
                 canvas.Write(key)
@@ -1817,15 +1816,27 @@ class ResultsPanel(QTabWidget):
 
     # ── Waveforms ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _root_canvas_alive(canvas, name: str) -> bool:
-        """Return True if the ROOT TCanvas still exists (not closed by the user)."""
-        try:
-            import ROOT  # noqa: PLC0415
-            return (canvas is not None and
-                    ROOT.gROOT.GetListOfCanvases().FindObject(name) is not None)
-        except Exception:  # noqa: BLE001
-            return False
+    def _ensure_canvas(self, attr, name, title, w, h):
+        """Return a live ROOT TCanvas stored on ``self.<attr>``, creating it if needed.
+
+        Robust to the user closing the window: each canvas's ``Closed()`` signal nulls
+        ``self.<attr>`` (via a kept-alive TPyDispatcher), and pending close events are
+        flushed first, so a stale dead-window canvas is never reused — which on macOS
+        otherwise draws to a freed Cocoa drawable and hard-crashes the process.  The
+        canvas list itself is unreliable here: a closed canvas lingers in
+        ``GetListOfCanvases()`` even though its native window is gone.
+        """
+        import ROOT  # noqa: PLC0415
+        ROOT.gSystem.ProcessEvents()          # deliver any pending window-close → Closed()
+        canvas = getattr(self, attr)
+        if canvas is not None:
+            return canvas                     # still open (a close would have nulled it)
+        canvas = ROOT.TCanvas(name, title, w, h)
+        disp = ROOT.TPyDispatcher(lambda a=attr: setattr(self, a, None))
+        canvas.Connect("Closed()", "TPyDispatcher", disp, "Dispatch()")
+        self._canvas_dispatchers[attr] = disp  # keep the dispatcher alive
+        setattr(self, attr, canvas)
+        return canvas
 
     def _process_root_events(self):
         """Keep the ROOT TCanvas window responsive while Qt runs."""
@@ -2172,13 +2183,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._root_canvas, "tgc_waveforms"):
-                self._root_canvas = None
-            if self._root_canvas is None:
-                self._root_canvas = ROOT.TCanvas(
-                    "tgc_waveforms", "TGC Waveforms", 950, 700
-                )
-                self._root_canvas.SetWindowSize(950, 700)
+            self._root_canvas = self._ensure_canvas(
+                "_root_canvas", "tgc_waveforms", "TGC Waveforms", 950, 700)
 
             self._root_canvas.Clear()
             self._root_canvas.Divide(1, 2)
@@ -2304,13 +2310,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._charge_canvas, "tgc_charges"):
-                self._charge_canvas = None
-            if self._charge_canvas is None:
-                self._charge_canvas = ROOT.TCanvas(
-                    "tgc_charges", "TGC Integrals", 950, 700
-                )
-                self._charge_canvas.SetWindowSize(950, 700)
+            self._charge_canvas = self._ensure_canvas(
+                "_charge_canvas", "tgc_charges", "TGC Integrals", 950, 700)
 
             self._charge_canvas.Clear()
             self._charge_canvas.Divide(1, 2)
@@ -2517,11 +2518,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._tracks_canvas, "tgc_tracks"):
-                self._tracks_canvas = None
-            if self._tracks_canvas is None:
-                self._tracks_canvas = ROOT.TCanvas(
-                    "tgc_tracks", "TGC 3D Tracks", 900, 700)
+            self._tracks_canvas = self._ensure_canvas(
+                "_tracks_canvas", "tgc_tracks", "TGC 3D Tracks", 900, 700)
 
             self._tracks_canvas.cd()
             self._tracks_canvas.Clear()
@@ -2966,11 +2964,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._efield_root_canvas, "tgc_efield"):
-                self._efield_root_canvas = None
-            if self._efield_root_canvas is None:
-                self._efield_root_canvas = ROOT.TCanvas(
-                    "tgc_efield", "TGC E-Field", 1300, 500)
+            self._efield_root_canvas = self._ensure_canvas(
+                "_efield_root_canvas", "tgc_efield", "TGC E-Field", 1300, 500)
 
             self._efield_root_canvas.Clear()
             self._efield_root_canvas.Divide(3, 1)
@@ -3196,11 +3191,8 @@ class ResultsPanel(QTabWidget):
             import ROOT  # noqa: PLC0415
             ROOT.gROOT.SetBatch(False)
 
-            if not self._root_canvas_alive(self._wfield_root_canvas, "tgc_wfield"):
-                self._wfield_root_canvas = None
-            if self._wfield_root_canvas is None:
-                self._wfield_root_canvas = ROOT.TCanvas(
-                    "tgc_wfield", "TGC Weighting Field", 1300, 500)
+            self._wfield_root_canvas = self._ensure_canvas(
+                "_wfield_root_canvas", "tgc_wfield", "TGC Weighting Field", 1300, 500)
 
             self._wfield_root_canvas.Clear()
             self._wfield_root_canvas.Divide(3, 1)
