@@ -1,10 +1,12 @@
 # TGC Detector Simulation
 
 A Garfield++ simulation of a Thin Gap Chamber (TGC) multi-wire proportional detector.
-The simulation deposits primary ionisation electrons at a configurable depth in the gas
-gap, transports them through avalanche multiplication, and records the induced charge on
-both the wire plane (anode) and one cathode plane.  Results can be explored via a PyQt5
-desktop GUI or the command-line binary directly.
+The code deposits primary ionisation electrons at a configurable depth in the gas gap,
+transports them through avalanche multiplication, and records the raw induced-current
+signals on the sense-wire anode and cathode readout plane.  It can also propagate those
+signals through an optional fast current-amplifier model to produce scope-like output
+waveforms.  Results can be explored either from the command line or through the PyQt5
+desktop GUI, with the same JSON configuration schema in both paths.
 
 ---
 
@@ -15,8 +17,8 @@ projects/tgc/
 ├── src/
 │   └── tgc_sim.cc              ← simulation binary (C++20, ~1650 lines)
 ├── config/
-│   ├── default_tgc.json            ← production config
-│   ├── default_tgc_fast-current.json ← fast preset (short window, narrow E-grid)
+│   ├── default_tgc.json            ← baseline long-window config
+│   ├── default_tgc_fast-current.json ← short-window diagnostic preset
 │   ├── smoke_tgc_2.json            ← fast smoke test (ncoll=2, 10 events)
 │   └── smoke_tgc_5.json            ← medium smoke test (ncoll=5)
 ├── gui/
@@ -29,6 +31,12 @@ projects/tgc/
 ├── build/                      ← cmake output (gitignored)
 └── results/                    ← simulation output (gitignored)
 ```
+
+Typical workflow: run `tgc_sim` to produce `summary.csv`, `tgc_sim.root`, and a resolved
+`run_config.json`; inspect physical charge/current observables directly in those files or
+load them in the GUI for waveform, integral, field-map, and track views.  The raw Garfield
+branches are always stored.  Amplifier-output branches are added alongside them when the
+front-end model is enabled.
 
 ---
 
@@ -300,7 +308,9 @@ into 50 Ω gives a 10–50 ns input RC that attenuates a 1 ns spike strongly;
 real coating's ρ_s is much lower than configured, τ_screen drops into the
 few-ns range and the sheet itself starts eating the spike; (d) the spike carries
 only a small fraction of the pad charge (wire screening), so after any of the
-above it sits below the noise floor.
+above it sits below the noise floor.  For experiment matching, compare measured
+traces first to `anode_amp` / `cathode_amp` (or the GUI's **Amplifier** display
+mode), not only to the raw Garfield current branches.
 
 ### 5. Front-end electronics — fast current amplifier
 
@@ -347,14 +357,16 @@ amplifier output still shows the spike on both channels.  The absence of the spi
 in measured data therefore comes from elsewhere (input loading, grounding, the
 actual ρ_s) — see *Why the electron spike appears on the simulated cathode* above.
 
-To model that "elsewhere", the cathode channel now supports two optional
+To model that "elsewhere", the cathode channel supports two optional
 measurement-chain terms without changing the Garfield weighting field itself:
 `readout.pad_area_cm2` sets the finite readout-pad area used to compute the
 pad ↔ grounded-backplane capacitance (when `ground_plane_enabled = true`), and
 `amplifier.cathode_cable_cap_pf` adds lumped cable/scope capacitance.  Together
 they create a cathode-side input RC low-pass before the current amplifier.
-`amplifier.output_sample_ns` then applies a boxcar average to mimic the finite
-acquisition aperture of the digitizer.
+The resistive sheet itself does **not** enter this extra amplifier RC; its effect
+remains on the Garfield side through the α-scaled weighting potential and the
+optional delayed-relaxation filter.  `amplifier.output_sample_ns` then applies a
+boxcar average to mimic the finite acquisition aperture of the digitizer.
 
 ---
 
@@ -448,6 +460,11 @@ waveforms after `DriftLineRKF` transport failures.  In this workspace, sourcing
 `../../local/garfield/share/Garfield/setupGarfield.sh` before running the binary
 is the simplest way to provide the required runtime environment.
 
+For measured-waveform comparisons, keep the raw Garfield current and the downstream
+readout chain separate: the CLI and ROOT output always retain the raw induced-current
+branches, while the optional amplifier branches represent the first place to compare
+against oscilloscope traces.
+
 The smoke CTest validates the build without generating a gas file from scratch.
 Two smoke configs are provided: `smoke_tgc_2.json` (ncoll=2, fastest) and
 `smoke_tgc_5.json` (ncoll=5, slightly higher accuracy).
@@ -481,64 +498,32 @@ python3 projects/tgc/gui/app.py
 The binary is resolved automatically as `projects/tgc/build/tgc_sim`.  If it has not
 been built yet, the window opens with a warning in the title bar.
 
-### Window layout
+### Interface
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│  TGC Simulation          [▶ Run]  [■ Stop]  [Load Config]  [Save Config]                │
-├─────────────────────────────────┬───────────────────────────────────────────────────────┤
-│  ▼ Geometry                     │  [ Log | Summary | Plots | Waveforms |                │
-│    Wire pitch [cm]   0.18       │    Charge | E-Field | 3D Tracks | Magboltz ]           │
-│    Wire diameter [μm] 50        │                                                       │
-│    Gap [cm]          0.14       │  ← live output / results shown here                   │
-│    N wires           10         │                                                       │
-│    Wire voltage [V]  1900       │                                                       │
-│    Sense wires  [✓ All wires]   │                                                       │
-│               [e.g. 4,5]        │                                                       │
-│  ▼ Readout                      │                                                       │
-│    Type        [Conductive ▼]   │                                                       │
-│    (Insulator  [Kapton ▼])      │                                                       │
-│    (Thickness  100 μm)          │                                                       │
-│    (Resistivity 500 kΩ/sq)      │                                                       │
-│    (Delayed signal [✓])         │                                                       │
-│  ▼ Amplifier                    │                                                       │
-│    Enable        [ ]            │                                                       │
-│    (Gain [dB]    40 …)          │  ← rows enabled when Enable is checked                │
-│  ▼ Source                       │                                                       │
-│    Energy [keV]      5.9        │                                                       │
-│    Distance     [ Random]       │                                                       │
-│      fixed dist [mm] -0.7,0.7   │  ← comma-separated; one run per value                 │
-│    X position   [ Random]       │                                                       │
-│      fixed x [cm]  [0.0,0.09]  │  ← Random unchecks → uniform over wire span           │
-│  ▼ Gas                          │                                                       │
-│    Gas 1  [ar  ▼]  70.0 %      │                                                       │
-│    Gas 2  [co2 ▼]  30.0 %      │                                                       │
-│    Ion species  [co2 ▼]         │                                                       │
-│    Temperature [K]   293.15     │                                                       │
-│    Pressure [Torr]   750        │                                                       │
-│    Gas file  [ar_70…gas] […]   │                                                       │
-│    Penning  [✓]  ncoll  10      │                                                       │
-│    W-value [eV]  26.0           │                                                       │
-│  ▼ Simulation                   │                                                       │
-│    Events         1            │                                                       │
-│    Max aval. size 500000        │                                                       │
-│    Time window [ns] 40000       │                                                       │
-│    Time step [ns]   0.5         │                                                       │
-│    Ion transport  [✓]           │                                                       │
-│    Store drift lines [✓]        │                                                       │
-│  ▼ Output                       │                                                       │
-│    Directory  [results/] […]    │                                                       │
-│    Run name   [auto (date+V+n)] │                                                       │
-└─────────────────────────────────┴───────────────────────────────────────────────────────┘
-```
+The GUI is split into a **configuration panel** on the left and a **results area** on
+the right.
+
+- The left panel mirrors the JSON schema section-for-section: `Geometry`, `Readout`,
+  `Amplifier`, `Source`, `Gas`, `Simulation`, and `Output`.  `Load Config` and
+  `Save Config` operate on the same `.json` files that the CLI accepts via `--config`.
+- The top toolbar controls execution: `Run` launches `tgc_sim` in a background thread,
+  `Stop` sends `SIGTERM`, and the window stays responsive while stdout streams into the
+  `Log` tab.
+- The right side hosts the result views.  A shared **Display** selector in the Results
+  header keeps the `Waveforms` and `Integrals` tabs in sync: `Amplifier` is the default
+  when nonzero amplifier branches are present in the loaded ROOT file; otherwise the GUI
+  falls back to `Raw`.
+- Only the waveform-oriented views switch mode.  `Summary` and `Plots` always show the
+  physical raw-charge statistics from `summary.csv` / ROOT summary objects, independent of
+  the current display mode.
 
 | Tab | Contents |
 |---|---|
 | **Log** | Live stdout stream from `tgc_sim`, auto-scrolling |
-| **Summary** | Table from `summary.csv` — one row per source distance |
-| **Plots** | 2 × 3 matplotlib figure: ⟨Q_anode⟩, ⟨Q_cathode⟩, ⟨Q_cathode_top⟩, charge ratio, and avalanche size vs source distance (with SEM error bars). Sixth cell empty |
-| **Waveforms** | Per-event anode and cathode traces for a chosen (distance, x-position) combination. A shared **Display** selector in the Results tab bar switches both the Waveforms and Integrals tabs between **Amplifier** (default when nonzero amplifier output is available) and **Raw** Garfield signals. The **e⁻/ion components** checkbox overlays the separate electron and ion contributions only in Raw mode. Read directly from the ROOT file via uproot |
-| **Integrals** | Running integral of the currently displayed Waveforms mode for anode and cathode, per (distance, x-position) pair. In Raw mode this is cumulative charge `Q(t)` in fC; in Amplifier mode it is the cumulative amplifier-output integral in mV·ns. ROOT TCanvas opens separately (PyROOT required) |
+| **Summary** | Table from `summary.csv`, one row per simulated `(source distance, x-position)` combination |
+| **Plots** | 2 × 3 matplotlib figure of the raw summary observables: ⟨Q_anode⟩, ⟨Q_cathode⟩, ⟨Q_cathode_top⟩, charge ratio, and avalanche size vs source distance (with SEM error bars). Sixth cell empty |
+| **Waveforms** | Per-event anode and cathode traces for a chosen `(distance, x-position)` combination. In **Amplifier** mode it plots `anode_amp` / `cathode_amp` in mV; in **Raw** mode it plots `anode` / `cathode` in fC/ns. The **e⁻/ion components** checkbox overlays the separate electron and ion contributions only in Raw mode. Data are read from the ROOT file via `uproot` and drawn in a ROOT `TCanvas` (PyROOT required) |
+| **Integrals** | Running integral of the currently displayed waveform mode for anode and cathode, per `(distance, x-position)` pair. In Raw mode this is cumulative charge `Q(t)` in fC; in Amplifier mode it is the cumulative amplifier-output integral in mV·ns. Drawn in a ROOT `TCanvas` (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
 | **Weighting Field** | Exact Shockley–Ramo weighting field/potential of a selected electrode (`anode`, `cathode`, `cathode_top`), computed with Garfield's `ComponentAnalyticField` — the same geometry the simulation uses, so the wire screening is faithful. Quantity selectable (W potential, \|E_w\|, E_w,x, E_w,y); XY colour map plus X/Y profile slices. Interactive from the geometry spinboxes — no simulation run needed. In resistive mode the cathode map is α-scaled and the insulator region shows the weighting-potential ramp (α→1 up to the readout pad), with the resistive layer and pad marked; the time-domain exp(−t/τ) relaxation is not shown on the static map. Requires PyROOT **and** a loadable Garfield library |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
@@ -548,11 +533,16 @@ been built yet, the window opens with a warning in the title bar.
 responsive).  **■ Stop** sends SIGTERM.  **Load Config** / **Save Config** read and
 write `.json` files that are fully compatible with the CLI `--config` flag.
 
-> **Note:** The E-Field, Weighting Field, 3D Tracks, and Magboltz tabs open ROOT TCanvas
-> windows and require PyROOT (ROOT importable from Python — available automatically when
-> using the conda ROOT installation described in the Build section above). The Weighting
-> Field tab additionally loads the Garfield shared library into the process; if it cannot
-> be found the tab logs a message and is disabled (the rest of the GUI is unaffected).
+> **Note:** The Waveforms, Integrals, E-Field, Weighting Field, 3D Tracks, and Magboltz
+> tabs open ROOT `TCanvas` windows and require PyROOT (ROOT importable from Python —
+> available automatically when using the conda ROOT installation described in the Build
+> section above). The Waveforms and Integrals tabs also require `uproot` to read the
+> per-event arrays from `tgc_sim.root`. The Weighting Field tab additionally loads the
+> Garfield shared library into the process; if it cannot be found the tab logs a message
+> and is disabled (the rest of the GUI is unaffected).
+
+For debugging, the raw Garfield waveforms stay available even when amplifier output exists;
+the GUI simply makes the amplifier view the first-class default for waveform comparison.
 
 ---
 
@@ -600,7 +590,7 @@ Physics § 5. All keys are ignored when `enable = false`.
 | `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | Lower −3 dB band edge → high-pass τ = 1/(2π·f) ≈ 15.9 µs. Slow baseline droop, visible only in long time windows |
 | `coupling_cap_nf`      | float  | nF   | 1.0          | AC-coupling capacitor at the input. With R_in sets the pad high-pass τ (1 nF, 50 Ω → 50 ns) |
 | `wire_series_cap_pf`   | float  | pF   | 470.0        | Extra series capacitor on the **anode (wire)** input only; in series with the coupling cap (470 pF ⊕ 1 nF = 320 pF) it gives the wire channel a shorter high-pass τ ≈ 16 ns |
-| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with the pad ↔ backplane capacitance implied by `readout.pad_area_cm2` and `ground_plane_insulator_*`, it creates a cathode-side input low-pass that can suppress the prompt pad spike |
+| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with the pad ↔ backplane capacitance implied by `readout.pad_area_cm2` and `ground_plane_insulator_*`, it creates a cathode-side input low-pass that can suppress the prompt pad spike. The resistive sheet is not part of this amplifier-side RC term |
 | `output_sample_ns`     | float  | ns   | 0.0          | Finite acquisition aperture applied as a boxcar average on the amplifier output. Use this to mimic digitizer sampling that further averages down sub-ns features after the analog front end |
 
 ### `source`
@@ -730,6 +720,9 @@ the literal `dist_rnd`.
 | `ion_npts` | vector\<int\> | Number of drift-line points stored per ion path |
 
 This tree is read by the GUI Waveforms, Integrals, and 3D Tracks tabs via `uproot`.
+`anode` / `cathode` remain the raw Garfield current branches; `anode_amp` /
+`cathode_amp` are the optional amplifier-output branches used by the GUI's
+**Amplifier** display mode.
 
 ---
 
@@ -783,6 +776,10 @@ currently-rendered ROOT TCanvas objects, one per tab, keyed as follows:
 
 Only keys for canvases that were open and alive at run completion are written.
 The file is omitted (and a warning logged) if PyROOT is unavailable.
+
+The snapshot preserves the currently displayed waveform mode: in the `Waveforms` and
+`Integrals` canvases this can be either raw Garfield current/charge or amplifier output,
+while the summary-style tabs always remain in physical raw-signal units.
 
 ---
 
@@ -878,6 +875,11 @@ In **resistive mode**, the cathode waveform includes both the prompt component
 component (exponential tail from the decaying surface potential).  The delayed
 tail has characteristic time τ printed to stdout at startup; set
 `time_window_ns` ≥ 5τ to capture most of the delayed charge.
+
+For direct comparison to measured oscilloscope traces, switch from the raw cathode
+waveform to the amplifier representation (`cathode_amp` or GUI **Amplifier** mode).
+The raw cathode current is still the right place to debug Garfield-side induction,
+species decomposition, and charge conservation.
 
 ### Charge ratio vs source distance
 

@@ -1982,6 +1982,25 @@ class ResultsPanel(QTabWidget):
             return False
         return True if data is None else bool(data.get("amp_available", False))
 
+    @staticmethod
+    def _display_label_meta(amp_mode: bool) -> dict:
+        """Mode-specific labels for the Qt metrics and ROOT canvases."""
+        if amp_mode:
+            return {
+                "wave_units": "V [mV]",
+                "root_integral_units": "#int V dt [mV#upointns]",
+                "qt_metric_labels": (
+                    "Integral anode [mV·ns]:",
+                    "Integral cathode [mV·ns]:",
+                    "Integral ratio:",
+                ),
+            }
+        return {
+            "wave_units": "i [fC/ns]",
+            "root_integral_units": "Q [fC]",
+            "qt_metric_labels": ("Q anode [fC]:", "Q cathode [fC]:", "Q ratio:"),
+        }
+
     def _select_display_series(self, data: dict, evt_idx: int) -> dict:
         amp_mode = self._display_amp_mode(data)
         if amp_mode:
@@ -1991,9 +2010,7 @@ class ResultsPanel(QTabWidget):
                 "cathode": data["cathode_amp"][evt_idx].astype("f8"),
                 "mean_a": data["mean_a_amp"].astype("f8"),
                 "mean_c": data["mean_c_amp"].astype("f8"),
-                "wave_units": "V [mV]",
-                "integral_units": "∫V [mV·ns]",
-                "metric_labels": ("∫V anode [mV·ns]:", "∫V cathode [mV·ns]:", "∫V ratio:"),
+                **self._display_label_meta(True),
             }
         return {
             "amp_mode": False,
@@ -2001,9 +2018,7 @@ class ResultsPanel(QTabWidget):
             "cathode": data["cathode"][evt_idx].astype("f8"),
             "mean_a": data["mean_a"].astype("f8"),
             "mean_c": data["mean_c"].astype("f8"),
-            "wave_units": "i [fC/ns]",
-            "integral_units": "Q [fC]",
-            "metric_labels": ("Q anode [fC]:", "Q cathode [fC]:", "Q ratio:"),
+            **self._display_label_meta(False),
         }
 
     @staticmethod
@@ -2125,9 +2140,9 @@ class ResultsPanel(QTabWidget):
         qa, qc, ratio = self._displayed_event_metrics(
             series["anode"], series["cathode"], dt
         )
-        self.wave_qa_title_lbl.setText(series["metric_labels"][0])
-        self.wave_qc_title_lbl.setText(series["metric_labels"][1])
-        self.wave_ratio_title_lbl.setText(series["metric_labels"][2])
+        self.wave_qa_title_lbl.setText(series["qt_metric_labels"][0])
+        self.wave_qc_title_lbl.setText(series["qt_metric_labels"][1])
+        self.wave_ratio_title_lbl.setText(series["qt_metric_labels"][2])
         self.wave_qa_lbl.setText(f"{qa:.4g}")
         self.wave_qc_lbl.setText(f"{qc:.4g}")
         self.wave_ratio_lbl.setText(f"{ratio:.4g}")
@@ -2308,7 +2323,7 @@ class ResultsPanel(QTabWidget):
                 ga = ROOT.TGraph(nbins, times, y_evt)
                 ga.SetTitle(
                     f"{signal_name} integral - {label}, event {evt_idx + 1};"
-                    f"Time [ns];{series['integral_units']}"
+                    f"Time [ns];{series['root_integral_units']}"
                 )
                 ga.SetLineColor(line_color)
                 ga.SetLineWidth(2)
