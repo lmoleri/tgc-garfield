@@ -523,7 +523,7 @@ been built yet, the window opens with a warning in the title bar.
 | **Waveforms** | Mean anode and cathode current waveforms overlaid per (distance, x-position) combination. A distance selector and (when fixed x-positions were simulated) an x-position dropdown choose the folder to display (a random distance/x-position appears as `—`). The **e⁻/ion components** checkbox overlays the separate electron and ion contributions to each induced current (requires a ROOT file with the component-split branches). The **Amplifier output [mV]** checkbox switches the traces to the front-end amplifier output voltage (requires a file produced with `amplifier.enable = true`). Read directly from the ROOT file via uproot |
 | **Charge** | Cumulative charge integrals Q(t) — running integral of each waveform — for anode and cathode, per (distance, x-position) pair. An event slider selects individual events. ROOT TCanvas opens separately (PyROOT required) |
 | **E-Field** | Interactive 2D electric field map in any of the XY, XZ, or YZ planes at a configurable depth; binning configurable from 50 to 10 000 bins per axis (PyROOT required) |
-| **Weighting Field** | Exact Shockley–Ramo weighting field/potential of a selected electrode (`anode`, `cathode`, `cathode_top`), computed with Garfield's `ComponentAnalyticField` — the same geometry the simulation uses, so the wire screening is faithful. Quantity selectable (W potential, \|E_w\|, E_w,x, E_w,y); XY colour map plus X/Y profile slices. Interactive from the geometry spinboxes — no simulation run needed. The resistive-mode α scaling and exp(−t/τ) relaxation are *not* applied (α is a constant ≈0.98). Requires PyROOT **and** a loadable Garfield library |
+| **Weighting Field** | Exact Shockley–Ramo weighting field/potential of a selected electrode (`anode`, `cathode`, `cathode_top`), computed with Garfield's `ComponentAnalyticField` — the same geometry the simulation uses, so the wire screening is faithful. Quantity selectable (W potential, \|E_w\|, E_w,x, E_w,y); XY colour map plus X/Y profile slices. Interactive from the geometry spinboxes — no simulation run needed. In resistive mode the cathode map is α-scaled and the insulator region shows the weighting-potential ramp (α→1 up to the readout pad), with the resistive layer and pad marked; the time-domain exp(−t/τ) relaxation is not shown on the static map. Requires PyROOT **and** a loadable Garfield library |
 | **3D Tracks** | Per-event 3D detector view in a ROOT TCanvas showing detector geometry and drift lines with correct aspect ratios. Controls: preset view buttons (Gap XY / Top XZ / Side YZ / 3D reset), zoom ± (down to 0.5 % of full range), pan X/Y/Z. Distance and x-position selectors mirror the simulated folder structure. Wires rendered as semi-transparent 12-sided tube wireframes at actual diameter (clipped to the visible frame); cathode planes clipped to visible cube. Primary electron and ion drift lines colour-coded (blue / green / magenta / grey) and semi-transparent (PyROOT required) |
 | **Magboltz** | Gas transport-property viewer: reads the `_props.csv` sidecar file exported automatically alongside the `.gas` file. Displays electron drift velocity, Townsend α, attachment η, longitudinal and transverse diffusion coefficients, effective gain (α − η), ion drift velocity, and ion mobility as a function of E-field — all in one ROOT TCanvas (8 panels). Export buttons save the plots to a ROOT file or copy the CSV. Requires PyROOT |
 
@@ -833,6 +833,24 @@ wire plane toward the readout cathode, the cathode weighting potential rises mon
 The full induction extends over ~5–8 μs as the ions travel the 1.4 mm gap.  With the
 default 40 μs window the cathode signal reaches its plateau.  With a shorter 300 ns
 window it is still rising, having reached roughly one-third of its final value.
+
+**The fast electron spike on the cathode is physical, not a bug.**  It is tempting to
+expect no electron component on the cathode because the cathode weighting potential is
+small near the wire (the wire screens it — see the **Weighting Field** tab).  But what
+sets the induced charge is the *change* in weighting potential along the electron's path,
+ΔW_cathode, not its absolute value.  Just outside the wire surface (~30 μm) the weighting
+potentials are W_anode ≈ 0.36 and W_cathode ≈ W_cathode_top ≈ 0.32 (they sum to 1).  By the
+up–down symmetry of the two equidistant cathode planes, the avalanche electrons collapsing
+onto the wire split their induced charge almost equally between the two cathodes: each gets
+Wc/(1−Wa) ≈ 0.5 of the anode electron signal (the simulation gives cathode_e/anode_e ≈
+0.50).  This is genuine Shockley–Ramo induction — the three electrodes satisfy
+Q_anode + Q_cathode + Q_cathode_top ≈ 0 to machine precision.  The spike carries only ~8 %
+of the cathode *charge* but dominates the peak *current* because it is sub-nanosecond, so a
+real cathode readout usually does not resolve it (limited amplifier bandwidth; and the
+point-deposit approximation makes the simulated spike artificially narrow, ~0.2 ns vs ~3 ns
+in reality — see *Anode signal shape*).  The per-electrode electron/ion split
+(`anode_e`/`anode_i`/`cathode_e`/`cathode_i` branches and the Waveforms-tab **e⁻/ion
+components** overlay) lets you inspect this directly.
 
 In **resistive mode**, the cathode waveform includes both the prompt component
 (from charge drifting in the gas, attenuated by factor α) and the delayed

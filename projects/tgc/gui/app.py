@@ -937,6 +937,7 @@ class ResultsPanel(QTabWidget):
         self._wfield_objects: list = []
         self._garfield = None              # cached ROOT.Garfield once libs are loaded
         self._garfield_failed = False      # don't retry the load after a failure
+        self.config_panel = None           # set by MainWindow; live readout settings
 
         wave_widget = QWidget()
         wave_layout = QVBoxLayout(wave_widget)
@@ -2671,6 +2672,82 @@ class ResultsPanel(QTabWidget):
 
         return x, y, Ex, Ey
 
+    def _readout_layout(self, gap):
+        """Live readout geometry from the Config panel.
+
+        Returns (resistive, d_ins_cm, y_pad): the resistive layer sits at the gas
+        boundary y=-gap; the conductive readout pad sits at y_pad = -gap - d_ins.
+        Falls back to a conductive plane at -gap when no Config panel is linked.
+        """
+        cp = self.config_panel
+        if cp is None:
+            return False, 0.0, -gap
+        resistive = cp.readout_type.currentText() == "Resistive"
+        d_ins_cm = min(cp.insulator_thickness.value() * 1e-4, gap) if resistive else 0.0
+        return resistive, d_ins_cm, -gap - d_ins_cm
+
+    def _draw_readout_markers(self, objects, x_half, gap, shade_insulator=True):
+        """Mark the readout cathode, resistive layer, and insulator pad on a 2D map.
+
+        Draws into the current gPad and appends every ROOT primitive to `objects`
+        so Python keeps them alive.  Mirrors the gas-gap geometry the simulation uses.
+        `shade_insulator` paints a grey band over the insulator strip; pass False when
+        that region already holds real data (the cathode weighting-potential ramp).
+        """
+        import ROOT  # noqa: PLC0415
+        resistive, d_ins_cm, y_pad = self._readout_layout(gap)
+
+        def _label(x, y, text, color):
+            t = ROOT.TLatex(x, y, text)
+            t.SetTextSize(0.030)
+            t.SetTextColor(color)
+            t.Draw()
+            objects.append(t)
+
+        x_lab = -x_half + 0.04 * (2 * x_half)   # a little in from the left frame edge
+
+        # Top plane: non-readout ground cathode (grey dashed, as before)
+        top = ROOT.TLine(-x_half, gap, x_half, gap)
+        top.SetLineStyle(2)
+        top.SetLineColor(ROOT.kGray + 1)
+        top.Draw()
+        objects.append(top)
+        _label(x_lab, gap - 0.07 * gap, "cathode (ground)", ROOT.kGray + 2)
+
+        if resistive:
+            # Insulator band between the resistive layer (-gap) and the pad (y_pad).
+            # Only shade it when the strip is otherwise empty (don't cover real data).
+            if shade_insulator:
+                band = ROOT.TBox(-x_half, y_pad, x_half, -gap)
+                band.SetFillColorAlpha(ROOT.kGray, 0.35)
+                band.Draw()
+                objects.append(band)
+            _label(x_lab, 0.5 * (y_pad - gap), "insulator", ROOT.kGray + 3)
+
+            # Resistive layer at the gas boundary (orange solid)
+            rl = ROOT.TLine(-x_half, -gap, x_half, -gap)
+            rl.SetLineColor(ROOT.kOrange + 7)
+            rl.SetLineWidth(2)
+            rl.Draw()
+            objects.append(rl)
+            _label(x_lab, -gap + 0.02 * gap, "resistive layer", ROOT.kOrange + 7)
+
+            # Conductive readout cathode pad behind the insulator (red solid)
+            pad = ROOT.TLine(-x_half, y_pad, x_half, y_pad)
+            pad.SetLineColor(ROOT.kRed + 1)
+            pad.SetLineWidth(2)
+            pad.Draw()
+            objects.append(pad)
+            _label(x_lab, y_pad + 0.02 * gap, "readout cathode (pad)", ROOT.kRed + 1)
+        else:
+            # Solid readout cathode plane at -gap (red solid)
+            rc = ROOT.TLine(-x_half, -gap, x_half, -gap)
+            rc.SetLineColor(ROOT.kRed + 1)
+            rc.SetLineWidth(2)
+            rc.Draw()
+            objects.append(rc)
+            _label(x_lab, -gap + 0.02 * gap, "readout cathode", ROOT.kRed + 1)
+
     def _update_efield_plots(self, recompute: bool = True):
         """Draw electric-field maps for XY, ZX-slice, and ZY-slice planes."""
         if recompute:
@@ -2735,11 +2812,17 @@ class ResultsPanel(QTabWidget):
             nx_v, ny_v = len(x), len(y)
             dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
             dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
+            y_top, y_bot = y[-1] + dy / 2, y[0] - dy / 2
+            # Extend the y-axis below -gap to expose the insulator/pad stack (resistive
+            # mode); the extra rows stay empty (COLZ skips them) → blank insulator strip.
+            _resistive, _dins, _ypad = self._readout_layout(gap)
+            n_extra = (max(0, int(np.ceil((y_bot - (_ypad - max(0.4 * _dins, 0.02 * gap))) / dy)))
+                       if _resistive else 0)
             h2 = ROOT.TH2F(
                 "h_efield",
                 f"XY plane - {comp} [V/cm];x [cm];y [cm]",
                 nx_v, x[0] - dx / 2, x[-1] + dx / 2,
-                ny_v, y[0] - dy / 2, y[-1] + dy / 2,
+                ny_v + n_extra, y_bot - n_extra * dy, y_top,
             )
             h2.SetStats(0)
             h2.FillN(
@@ -2755,12 +2838,7 @@ class ResultsPanel(QTabWidget):
                 m.SetMarkerSize(1.5)
                 m.Draw()
                 self._efield_objects.append(m)
-            for y_c in [-gap, gap]:
-                ln = ROOT.TLine(-x_half, y_c, x_half, y_c)
-                ln.SetLineStyle(2)
-                ln.SetLineColor(ROOT.kGray + 1)
-                ln.Draw()
-                self._efield_objects.append(ln)
+            self._draw_readout_markers(self._efield_objects, x_half, gap)
             self._efield_objects.append(h2)
 
             # ── Pad 2: E(x) profile at y = y0 ────────────────────────────────
@@ -2870,6 +2948,33 @@ class ResultsPanel(QTabWidget):
                 caf.WeightingField(float(xv), float(yv), 0.0, cx, cy, cz, electrode)
                 Wx[iy, ix] = cx.value
                 Wy[iy, ix] = cy.value
+
+        # Resistive readout: the gas-facing electrode at -gap is the resistive layer; the
+        # conductive readout pad sits at -gap-d behind the insulator.  In the gas the pad
+        # weighting potential is the dielectric-attenuated cathode field (× α); across the
+        # insulator it ramps α → 1 at the pad.  Extend the grid downward to show that.
+        resistive, d_ins_cm, _ = self._readout_layout(gap)
+        if resistive and d_ins_cm > 0:
+            cp = self.config_panel
+            eps_r = 4.6 if (cp and cp.insulator_material.currentText().lower() == "fr4") else 3.5
+            alpha = eps_r * gap / (d_ins_cm + eps_r * gap)
+            dy = (y[-1] - y[0]) / max(ny - 1, 1)
+            n_ins = max(1, int(np.ceil((y[0] - (-gap - d_ins_cm)) / dy)))
+            y_ins = y[0] - dy * np.arange(1, n_ins + 1)        # descending below the gas grid
+            Wi  = np.zeros((n_ins, nx))
+            Wix = np.zeros((n_ins, nx))
+            Wiy = np.zeros((n_ins, nx))
+            if electrode == "cathode":
+                # physical pad weighting potential: α-scaled gas, continuous with the ramp
+                W *= alpha; Wx *= alpha; Wy *= alpha
+                frac = np.clip((-gap - y_ins) / d_ins_cm, 0.0, 1.0)
+                Wi[:] = (alpha + (1.0 - alpha) * frac)[:, None]
+                Wiy[(frac > 0.0) & (frac < 1.0), :] = (1.0 - alpha) / d_ins_cm
+            # anode / cathode_top: insulator stays 0 (screened by the grounded resistive layer)
+            y  = np.concatenate([y_ins[::-1], y])              # ascending: insulator below gas
+            W  = np.vstack([Wi[::-1],  W])
+            Wx = np.vstack([Wix[::-1], Wx])
+            Wy = np.vstack([Wiy[::-1], Wy])
         return x, y, W, Wx, Wy
 
     def _update_wfield_plots(self, recompute: bool = True):
@@ -2888,9 +2993,11 @@ class ResultsPanel(QTabWidget):
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[GUI] Weighting-field computation error: {exc}")
                 return
+            _res, _dins, _ = self._readout_layout(gap)
             self._wfield_cache = {"x": x, "y": y, "W": W, "Wx": Wx, "Wy": Wy,
                                   "gap": gap, "pitch": pitch, "n_wires": n_wires,
-                                  "electrode": electrode}
+                                  "electrode": electrode,
+                                  "resistive": _res, "d_ins_cm": _dins}
         elif self._wfield_cache is None:
             return  # nothing cached yet
 
@@ -2938,6 +3045,8 @@ class ResultsPanel(QTabWidget):
             nx_v, ny_v = len(x), len(y)
             dx = (x[-1] - x[0]) / max(nx_v - 1, 1)
             dy = (y[-1] - y[0]) / max(ny_v - 1, 1)
+            # The grid from _compute_wfield already includes the insulator rows below -gap
+            # (resistive mode), so the TH2 spans the full data range.
             h2 = ROOT.TH2F(
                 "h_wfield",
                 f"XY plane - {sym}_{{{electrode}}}{unit};x [cm];y [cm]",
@@ -2958,12 +3067,10 @@ class ResultsPanel(QTabWidget):
                 m.SetMarkerSize(1.5)
                 m.Draw()
                 self._wfield_objects.append(m)
-            for y_c in [-gap, gap]:
-                ln = ROOT.TLine(-x_half, y_c, x_half, y_c)
-                ln.SetLineStyle(2)
-                ln.SetLineColor(ROOT.kGray + 1)
-                ln.Draw()
-                self._wfield_objects.append(ln)
+            # The cathode insulator is filled with the real ramp → don't shade over it;
+            # for anode/cathode_top the insulator is blank, so keep the grey band.
+            self._draw_readout_markers(self._wfield_objects, x_half, gap,
+                                       shade_insulator=(electrode != "cathode"))
             self._wfield_objects.append(h2)
 
             # ── Pad 2: profile along x at y = y0 ─────────────────────────────
@@ -3042,6 +3149,9 @@ class MainWindow(QMainWindow):
 
         self.config_panel  = ConfigPanel()
         self.results_panel = ResultsPanel()
+        # Give the results tabs live access to the Readout settings (E-Field /
+        # Weighting Field tabs mark the readout cathode + resistive layer).
+        self.results_panel.config_panel = self.config_panel
 
         splitter.addWidget(self.config_panel)
         splitter.addWidget(self.results_panel)
