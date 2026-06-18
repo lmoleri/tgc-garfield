@@ -206,7 +206,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Geometry ──────────────────────────────────────────────────────
         geo_box  = QGroupBox("Geometry")
-        geo_form = QFormLayout(geo_box)
+        geo_form = self._left_form_layout(geo_box)
 
         self.wire_pitch = self._dspin(0.05, 5.0, 0.01, 3, 0.18)
         self.wire_diam  = self._dspin(10.0, 500.0, 1.0, 1, 50.0)
@@ -236,7 +236,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Readout ───────────────────────────────────────────────────────
         ro_box  = QGroupBox("Readout")
-        ro_form = QFormLayout(ro_box)
+        ro_form = self._left_form_layout(ro_box)
 
         self.readout_type = QComboBox()
         self.readout_type.addItems(["Conductive", "Resistive"])
@@ -309,7 +309,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Amplifier (CIVIDEC C2-TCT front end) ──────────────────────────
         amp_box  = QGroupBox("Amplifier")
-        amp_form = QFormLayout(amp_box)
+        amp_form = self._left_form_layout(amp_box)
 
         self.amp_enable = QCheckBox()
         self.amp_enable.setChecked(False)
@@ -363,7 +363,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Source ────────────────────────────────────────────────────────
         src_box  = QGroupBox("Source")
-        src_form = QFormLayout(src_box)
+        src_form = self._left_form_layout(src_box)
 
         self.energy_kev = self._dspin(0.1, 100.0, 0.1, 2, 5.9)
 
@@ -390,7 +390,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Gas ───────────────────────────────────────────────────────────
         gas_box  = QGroupBox("Gas")
-        gas_form = QFormLayout(gas_box)
+        gas_form = self._left_form_layout(gas_box)
 
         # — Composition rows —
         _GAS_LIST = ["ar", "co2", "cf4", "ch4", "c2h6", "n2", "he", "ne"]
@@ -410,8 +410,7 @@ class ConfigPanel(QScrollArea):
         self.frac1_spin.setSuffix(" %")
 
         gas1_row = QWidget()
-        gas1_h   = QHBoxLayout(gas1_row)
-        gas1_h.setContentsMargins(0, 0, 0, 0)
+        gas1_h   = self._left_row_layout(gas1_row)
         gas1_h.addWidget(self.gas1_combo)
         gas1_h.addWidget(self.frac1_spin)
         gas_form.addRow("Gas 1 [%]", gas1_row)
@@ -426,8 +425,7 @@ class ConfigPanel(QScrollArea):
         self.gas2_frac_lbl.setToolTip("Fraction of gas 2 = 100% − gas 1 fraction (auto-computed)")
 
         gas2_row = QWidget()
-        gas2_h   = QHBoxLayout(gas2_row)
-        gas2_h.setContentsMargins(0, 0, 0, 0)
+        gas2_h   = self._left_row_layout(gas2_row)
         gas2_h.addWidget(self.gas2_combo)
         gas2_h.addWidget(self.gas2_frac_lbl)
         gas_form.addRow("Gas 2 [%]", gas2_row)
@@ -486,8 +484,7 @@ class ConfigPanel(QScrollArea):
         gas_form.addRow("Field points",        self.n_field_pts)
         gas_form.addRow("E-field min [V/cm]", self.e_field_min)
         ef_row = QWidget()
-        ef_h   = QHBoxLayout(ef_row)
-        ef_h.setContentsMargins(0, 0, 0, 0)
+        ef_h   = self._left_row_layout(ef_row)
         ef_h.addWidget(self.e_field_max)
         btn_ef_auto = QPushButton("Auto")
         btn_ef_auto.setFixedWidth(44)
@@ -524,7 +521,7 @@ class ConfigPanel(QScrollArea):
 
         # ── Simulation ────────────────────────────────────────────────────
         sim_box  = QGroupBox("Simulation")
-        sim_form = QFormLayout(sim_box)
+        sim_form = self._left_form_layout(sim_box)
 
         self.n_events    = self._spin(1, 100000, 1000)
         self.max_aval    = self._spin(1000, 10000000, 500000)
@@ -568,11 +565,10 @@ class ConfigPanel(QScrollArea):
 
         # ── Output ────────────────────────────────────────────────────────
         out_box  = QGroupBox("Output")
-        out_form = QFormLayout(out_box)
+        out_form = self._left_form_layout(out_box)
 
         out_row = QWidget()
-        out_h   = QHBoxLayout(out_row)
-        out_h.setContentsMargins(0, 0, 0, 0)
+        out_h   = self._left_row_layout(out_row)
         self.out_dir = QLineEdit("results")
         self.out_dir.setToolTip("Output base directory (relative paths resolve from projects/tgc/)")
         btn_out = QPushButton("…")
@@ -616,6 +612,21 @@ class ConfigPanel(QScrollArea):
         w.setRange(lo, hi)
         w.setValue(val)
         return w
+
+    @staticmethod
+    def _left_form_layout(parent: QWidget) -> QFormLayout:
+        form = QFormLayout(parent)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        return form
+
+    @staticmethod
+    def _left_row_layout(parent: QWidget) -> QHBoxLayout:
+        layout = QHBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return layout
 
     # ── gas file label ───────────────────────────────────────────────────
 
