@@ -121,8 +121,8 @@ struct AmplifierConfig {
   double inputImpedanceOhm = 50.0;    // input impedance [Ω]
   double bandwidthHighHz   = 2.0e9;   // upper −3 dB edge → low-pass τ = 1/(2π f)
   double bandwidthLowHz    = 1.0e4;   // lower −3 dB edge → high-pass τ = 1/(2π f)
-  double couplingCapNf     = 1.0;     // AC-coupling capacitor at the input [nF]
-  double wireSeriesCapPf   = 470.0;   // extra series cap on the anode (wire) input [pF]
+  double couplingCapNf     = 1.0;     // legacy/unused compatibility key [nF]
+  double wireSeriesCapPf   = 470.0;   // known external series cap on the anode input [pF]
   double cathodeCableCapPf = 0.0;     // extra pad-channel capacitance to ground [pF]
   double outputSampleNs    = 0.0;     // finite acquisition aperture / boxcar average [ns]
 };
@@ -551,8 +551,6 @@ Config LoadConfig(const fs::path& path) {
       throw std::runtime_error("amplifier.bandwidth_low_hz must be positive");
     if (cfg.amplifier.bandwidthLowHz >= cfg.amplifier.bandwidthHighHz)
       throw std::runtime_error("amplifier.bandwidth_low_hz must be below bandwidth_high_hz");
-    if (cfg.amplifier.couplingCapNf <= 0.)
-      throw std::runtime_error("amplifier.coupling_cap_nf must be positive");
     if (cfg.amplifier.wireSeriesCapPf <= 0.)
       throw std::runtime_error("amplifier.wire_series_cap_pf must be positive");
   }
@@ -778,13 +776,6 @@ double InsulatorEpsR(const std::string& material) {
   return 3.5;  // kapton (default)
 }
 
-double ComputePadBackplaneCapPf(const ReadoutConfig& ro) {
-  if (ro.type != "resistive" || ro.padAreaCm2 <= 0. || !ro.groundPlaneEnabled) return 0.;
-  const double eps0SI = 8.854e-12;  // F/m
-  const double areaM2 = ro.padAreaCm2 * 1.e-4;
-  const double dInsM  = ro.groundPlaneInsulatorUm * 1.e-6;
-  return eps0SI * InsulatorEpsR(ro.groundPlaneInsulatorMaterial) * areaM2 / dInsM * 1.e12;
-}
 
 ResistiveParams ComputeResistiveParams(const ReadoutConfig& ro,
                                        const GeometryConfig& geom) {
@@ -891,41 +882,23 @@ void ApplyResistiveRelaxation(std::vector<double>& i, const double dtNs,
   ApplyOnePoleHighPass(i, dtNs, tauNs);
 }
 
-// Derived parameters of the CIVIDEC C2-TCT amplifier model.  All time constants
-// in ns; the per-channel high-pass τ = R_in·C_series distinguishes the wire
-// input (extra 470 pF series cap) from the pad input (1 nF coupling only).
+// Derived parameters of the faithful transimpedance amplifier model.  Only the
+// intrinsic upper-bandwidth pole and the I→V gain are applied (see AmplifierOutputMv).
+// The input-network RC config keys (wire_series_cap_pf, cathode_cable_cap_pf,
+// coupling_cap_nf, bandwidth_low_hz) are now inert — kept only for config compatibility.
 struct AmplifierParams {
-  double tauHpAnodeNs;    // R_in · (couplingCap ⊕ wireSeriesCap)  [wire AC coupling]
-  double tauHpCathodeNs;  // R_in · couplingCap                    [pad AC coupling]
-  double tauHpLowNs;      // 1/(2π f_low)   — intrinsic lower band edge
-  double tauLpHighNs;     // 1/(2π f_high)  — intrinsic upper band edge
-  double tauLpCathodeInputNs;  // R_in · (C_backplane + C_cable)   [pad RC loading]
+  double tauLpHighNs;     // 1/(2π f_high)  — intrinsic upper band edge → low-pass τ
   double mvPerFcPerNs;    // output scale: V_out[mV] = gain·R_in·i[µA]·1e-3
-  double cathodeBackplaneCapPf;  // readout pad ↔ backplane capacitance [pF]
-  double cathodeTotalCapPf;      // backplane + cable shunt capacitance [pF]
-  double outputSampleNs;       // finite acquisition aperture       [ns]
+  double outputSampleNs;  // finite acquisition aperture       [ns]
 };
 
-AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp,
-                                       const ReadoutConfig& ro) {
-  const double gain  = std::pow(10., amp.gainDb / 20.);   // dB → linear voltage gain
-  const double R     = amp.inputImpedanceOhm;
-  const double cCpF  = amp.couplingCapNf * 1e3;           // nF → pF
-  // Wire input: extra series cap in series with the coupling cap (1/C = Σ 1/Cᵢ).
-  const double cWpF  = (cCpF * amp.wireSeriesCapPf) / (cCpF + amp.wireSeriesCapPf);
-  const double cathodeBackplaneCapPf = ComputePadBackplaneCapPf(ro);
-  const double cathodeTotalCapPf = cathodeBackplaneCapPf + amp.cathodeCableCapPf;
-  // τ[ns] = R[Ω]·C[F]·1e9 = R[Ω]·C[pF]·1e-3.
-  const double tauHpCathodeNs = R * cCpF * 1e-3;
-  const double tauHpAnodeNs   = R * cWpF * 1e-3;
-  const double tauHpLowNs     = 1e9 / (2. * M_PI * amp.bandwidthLowHz);
-  const double tauLpHighNs    = 1e9 / (2. * M_PI * amp.bandwidthHighHz);
-  const double tauLpCathodeInputNs = R * cathodeTotalCapPf * 1e-3;
+AmplifierParams ComputeAmplifierParams(const AmplifierConfig& amp) {
+  const double gain = std::pow(10., amp.gainDb / 20.);   // dB → linear voltage gain
+  const double R    = amp.inputImpedanceOhm;
+  const double tauLpHighNs  = 1e9 / (2. * M_PI * amp.bandwidthHighHz);
   // i[fC/ns] ≡ i[µA]; V = gain·R·i[µA] in µV → ×1e-3 for mV.
-  const double mvPerFcPerNs   = gain * R * 1e-3;
-  return {tauHpAnodeNs, tauHpCathodeNs, tauHpLowNs, tauLpHighNs,
-          tauLpCathodeInputNs, mvPerFcPerNs, cathodeBackplaneCapPf,
-          cathodeTotalCapPf, amp.outputSampleNs};
+  const double mvPerFcPerNs = gain * R * 1e-3;
+  return {tauLpHighNs, mvPerFcPerNs, amp.outputSampleNs};
 }
 
 void ApplyBoxcarAverage(std::vector<double>& x, const double dtNs,
@@ -949,24 +922,22 @@ void ApplyBoxcarAverage(std::vector<double>& x, const double dtNs,
   x.swap(y);
 }
 
-// Pass a binned induced current i [fC/ns ≡ µA] through the amplifier chain and
-// return the output voltage [mV].  The amplifier is linear and time-invariant, so
-// the filter order is irrelevant: upper-bandwidth low-pass, the channel's
-// AC-coupling high-pass (tauHpNs), the intrinsic lower-bandwidth high-pass, then
-// the gain·R_in scaling.  The cathode channel can also carry a pre-amplifier
-// input RC low-pass from the backplane/cable capacitance and an optional finite
-// acquisition aperture on the output.
+// Pass a binned induced current i [fC/ns ≡ µA] through the amplifier and return the
+// output voltage [mV].  The CIVIDEC C2-TCT is a broadband *transimpedance* current
+// amplifier: within its band the output faithfully follows the input current — there
+// is no differentiation.  We therefore apply ONLY the intrinsic upper-bandwidth
+// low-pass and the gain·R_in (I→V) scaling, plus an optional output acquisition
+// aperture.  The input-network RC terms (a 50 Ω-into-series-cap high-pass and a pad
+// capacitance low-pass) are deliberately NOT applied: the real input impedance is not
+// a 50 Ω-to-ground shunt and does not differentiate or load the signal on this scale.
+// The measured charge pulse is obtained downstream by integrating this faithful current.
 std::vector<double> AmplifierOutputMv(const std::vector<double>& iFcNs,
-                                      const double dtNs, const double tauHpNs,
-                                      const double tauInputLpNs,
+                                      const double dtNs,
                                       const AmplifierParams& amp) {
   std::vector<double> v(iFcNs);
-  ApplyOnePoleLowPass (v, dtNs, tauInputLpNs);
-  ApplyOnePoleLowPass (v, dtNs, amp.tauLpHighNs);
-  ApplyOnePoleHighPass(v, dtNs, tauHpNs);
-  ApplyOnePoleHighPass(v, dtNs, amp.tauHpLowNs);
-  for (auto& s : v) s *= amp.mvPerFcPerNs;
-  ApplyBoxcarAverage(v, dtNs, amp.outputSampleNs);
+  ApplyOnePoleLowPass(v, dtNs, amp.tauLpHighNs);    // intrinsic upper bandwidth (2 GHz)
+  for (auto& s : v) s *= amp.mvPerFcPerNs;          // transimpedance gain (I→V)
+  ApplyBoxcarAverage(v, dtNs, amp.outputSampleNs);  // optional acquisition aperture
   return v;
 }
 
@@ -1061,13 +1032,21 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   TProfile pCathodeAmp("p_cathode_amp",
                        "Mean cathode amplifier output;t [ns];#LTV_{cathode}#GT [mV]",
                        static_cast<int>(nBins), 0., sim.timeWindowNs);
+  // Integrated amplifier output [mV·ns] — the charge-proportional pulse comparable to
+  // a charge-sensitive readout (∫ of the faithful current-amp output).
+  TProfile pAnodeAmpInt("p_anode_amp_int",
+                        "Integrated anode amp output;t [ns];#LT#int V_{anode}dt#GT [mV ns]",
+                        static_cast<int>(nBins), 0., sim.timeWindowNs);
+  TProfile pCathodeAmpInt("p_cathode_amp_int",
+                          "Integrated cathode amp output;t [ns];#LT#int V_{cathode}dt#GT [mV ns]",
+                          static_cast<int>(nBins), 0., sim.timeWindowNs);
 
   for (TH1* h : std::initializer_list<TH1*>{
            &hAnodeQ, &hCathodeQ, &hCathodeTopQ, &hRatio,
            &hNprimary, &hAvalSize,
            &pAnodeSignal, &pCathodeSignal, &pCathodeTopSignal,
            &pAnodeElec, &pAnodeIon, &pCathodeElec, &pCathodeIon,
-           &pAnodeAmp, &pCathodeAmp}) {
+           &pAnodeAmp, &pCathodeAmp, &pAnodeAmpInt, &pCathodeAmpInt}) {
     h->SetDirectory(nullptr);
   }
 
@@ -1077,19 +1056,21 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
   std::vector<float> anodeSigE(nBins, 0.f), anodeSigI(nBins, 0.f);
   std::vector<float> cathodeSigE(nBins, 0.f), cathodeSigI(nBins, 0.f);
-  // Amplifier output [mV]; left zero when amplifier.enable is false.
+  // Amplifier output [mV] and its running integral [mV·ns]; zero when amplifier off.
   std::vector<float> anodeAmp(nBins, 0.f), cathodeAmp(nBins, 0.f);
+  std::vector<float> anodeAmpInt(nBins, 0.f), cathodeAmpInt(nBins, 0.f);
   // Per-bin readout buffers; in resistive mode the pad ("cathode") buffers get
   // the relaxation filter applied before any output is filled from them.
   std::vector<double> bufA(nBins), bufC(nBins), bufT(nBins);
   std::vector<double> bufAe(nBins), bufAi(nBins), bufCe(nBins), bufCi(nBins);
-  std::vector<double> bufAamp, bufCamp;  // amplifier output, computed per event
+  std::vector<double> bufAamp, bufCamp;          // amplifier output [mV], per event
+  std::vector<double> bufAampInt, bufCampInt;    // ∫ amplifier output dt [mV·ns]
   const bool resistiveRelax = cfg.readout.type == "resistive" &&
                               cfg.readout.enableDelayedSignal;
   const double relaxTauNs = resistiveRelax
       ? ComputeResistiveParams(cfg.readout, cfg.geometry).tauNs : 0.;
   const bool amplify = cfg.amplifier.enable;
-  const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier, cfg.readout);
+  const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier);
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
   signalTree.Branch("event",             &evtId, "event/I");
@@ -1103,6 +1084,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   signalTree.Branch("cathode_i", &cathodeSigI);
   signalTree.Branch("anode_amp",   &anodeAmp);
   signalTree.Branch("cathode_amp", &cathodeAmp);
+  signalTree.Branch("anode_amp_int",   &anodeAmpInt);
+  signalTree.Branch("cathode_amp_int", &cathodeAmpInt);
 
   // ── 3D track branches ────────────────────────────────────────────────────────
   // primary_x/y/z : points along the primary electron drift line (≥ 2 always;
@@ -1320,12 +1303,18 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     }
 
     if (amplify) {
-      // Front-end amplifier acts on the current that reaches it: the raw wire
-      // current and the post-relaxation pad current.  Output is voltage [mV].
-      bufAamp = AmplifierOutputMv(bufA, sim.timeStepNs, ampPar.tauHpAnodeNs,
-                                  /*tauInputLpNs=*/0., ampPar);
-      bufCamp = AmplifierOutputMv(bufC, sim.timeStepNs, ampPar.tauHpCathodeNs,
-                                  ampPar.tauLpCathodeInputNs, ampPar);
+      // Faithful transimpedance amp: V_amp ∝ i(t) (raw wire current, post-relaxation
+      // pad current).  The measured charge pulse is reproduced by integrating that
+      // current: V_int(t) = ∫ V_amp dt' [mV·ns], a charge-proportional signal.
+      bufAamp = AmplifierOutputMv(bufA, sim.timeStepNs, ampPar);
+      bufCamp = AmplifierOutputMv(bufC, sim.timeStepNs, ampPar);
+      bufAampInt.assign(nBins, 0.);
+      bufCampInt.assign(nBins, 0.);
+      double accA = 0., accC = 0.;
+      for (std::size_t k = 0; k < nBins; ++k) {
+        accA += bufAamp[k] * sim.timeStepNs; bufAampInt[k] = accA;
+        accC += bufCamp[k] * sim.timeStepNs; bufCampInt[k] = accC;
+      }
     }
 
     double rawAnode = 0., rawCathode = 0., rawCathodeTop = 0.;
@@ -1350,8 +1339,12 @@ DistanceSummary RunDistancePoint(const Config& cfg,
       if (amplify) {
         anodeAmp[k]   = static_cast<float>(bufAamp[k] * nPrimary);
         cathodeAmp[k] = static_cast<float>(bufCamp[k] * nPrimary);
+        anodeAmpInt[k]   = static_cast<float>(bufAampInt[k] * nPrimary);
+        cathodeAmpInt[k] = static_cast<float>(bufCampInt[k] * nPrimary);
         pAnodeAmp.Fill(t,   bufAamp[k] * nPrimary);
         pCathodeAmp.Fill(t, bufCamp[k] * nPrimary);
+        pAnodeAmpInt.Fill(t,   bufAampInt[k] * nPrimary);
+        pCathodeAmpInt.Fill(t, bufCampInt[k] * nPrimary);
       }
     }
 
@@ -1402,6 +1395,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     pCathodeIon.Write("p_cathode_ion");
     pAnodeAmp.Write("p_anode_amp");
     pCathodeAmp.Write("p_cathode_amp");
+    pAnodeAmpInt.Write("p_anode_amp_int");
+    pCathodeAmpInt.Write("p_cathode_amp_int");
     signalTree.Write("t_signals");
   }
 
@@ -1719,27 +1714,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (cfg.amplifier.enable) {
-      const AmplifierParams ap = ComputeAmplifierParams(cfg.amplifier, cfg.readout);
-      std::cout << "  Amplifier: " << cfg.amplifier.gainDb << " dB, "
-                << cfg.amplifier.bandwidthLowHz / 1e3 << " kHz – "
+      const AmplifierParams ap = ComputeAmplifierParams(cfg.amplifier);
+      std::cout << "  Amplifier: " << cfg.amplifier.gainDb << " dB, up to "
                 << cfg.amplifier.bandwidthHighHz / 1e9 << " GHz, "
-                << cfg.amplifier.inputImpedanceOhm << " Ω in; AC-coupling τ: wire "
-                << ap.tauHpAnodeNs << " ns (+" << cfg.amplifier.wireSeriesCapPf
-                << " pF), pad " << ap.tauHpCathodeNs << " ns; output "
-                << ap.mvPerFcPerNs << " mV per fC/ns";
-      if (ap.cathodeTotalCapPf > 0.) {
-        std::cout << "; cathode input RC τ " << ap.tauLpCathodeInputNs << " ns ("
-                  << ap.cathodeTotalCapPf << " pF";
-        if (ap.cathodeBackplaneCapPf > 0.) {
-          std::cout << " = " << ap.cathodeBackplaneCapPf << " pF pad↔backplane";
-          if (cfg.amplifier.cathodeCableCapPf > 0.) {
-            std::cout << " + " << cfg.amplifier.cathodeCableCapPf << " pF cable";
-          }
-        } else if (cfg.amplifier.cathodeCableCapPf > 0.) {
-          std::cout << " cable";
-        }
-        std::cout << ")";
-      }
+                << cfg.amplifier.inputImpedanceOhm << " Ω transimpedance; output "
+                << ap.mvPerFcPerNs << " mV per fC/ns; faithful current "
+                   "(no input-network differentiation), + integrated output [mV·ns]";
       if (cfg.amplifier.outputSampleNs > 0.) {
         std::cout << "; output sample " << cfg.amplifier.outputSampleNs << " ns";
       }

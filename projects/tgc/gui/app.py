@@ -317,29 +317,38 @@ class ConfigPanel(QScrollArea):
             "Apply the fast current-amplifier front end (CIVIDEC C2-TCT) to the\n"
             "anode (wire) and cathode (pad) waveforms, producing the output voltage\n"
             "[mV] as new branches. Off (default) leaves the run byte-for-byte\n"
-            "unchanged. The raw induced-current waveforms are always kept."
+            "unchanged. Faithful transimpedance model: V_out ∝ i(t) (2 GHz upper\n"
+            "bandwidth + gain only, no differentiation); the running integral\n"
+            "∫V dt [mV·ns] (the charge pulse) is also written. Raw current is kept."
         )
 
         self.amp_gain      = self._dspin(0.0, 120.0, 1.0, 1, 40.0)
         self.amp_gain.setToolTip("Voltage gain [dB] (40 dB = ×100)")
         self.amp_zin       = self._dspin(1.0, 10000.0, 1.0, 1, 50.0)
-        self.amp_zin.setToolTip("Input impedance [Ω]")
+        self.amp_zin.setToolTip(
+            "Amplifier input impedance [Ω]. Sets the transimpedance output scale\n"
+            "V_out = gain·R_in·i."
+        )
         self.amp_bw_high   = self._dspin(0.001, 100.0, 0.1, 3, 2.0)
-        self.amp_bw_high.setToolTip("Upper −3 dB bandwidth [GHz] → input low-pass τ = 1/(2π f)")
+        self.amp_bw_high.setToolTip("Upper −3 dB bandwidth [GHz] → low-pass τ = 1/(2π f); the only filter applied")
         self.amp_bw_low    = self._dspin(0.001, 1e6, 1.0, 3, 10.0)
-        self.amp_bw_low.setToolTip("Lower −3 dB bandwidth [kHz] → high-pass τ = 1/(2π f)")
+        self.amp_bw_low.setToolTip("Inert (kept for compatibility): the faithful model applies no low-frequency high-pass.")
         self.amp_coupling  = self._dspin(0.001, 1000.0, 0.1, 3, 1.0)
-        self.amp_coupling.setToolTip("AC-coupling capacitor at the input [nF]")
+        self.amp_coupling.setToolTip(
+            "Legacy compatibility field [nF]. Preserved in JSON files but unused by\n"
+            "the current amplifier model, which treats the amplifier itself only by\n"
+            "its datasheet band-pass and gain."
+        )
         self.amp_wire_cap  = self._dspin(0.1, 100000.0, 10.0, 1, 470.0)
         self.amp_wire_cap.setToolTip(
-            "Extra series capacitor on the anode (wire) input [pF]; in series with\n"
-            "the coupling cap it sets a shorter high-pass τ on the wire channel."
+            "Inert (kept for compatibility) [pF]. The 470 pF is a real DETECTOR\n"
+            "HV-decoupling cap on the wire; it is not applied as an amplifier high-pass\n"
+            "(it does not differentiate at the real input impedance)."
         )
         self.amp_cathode_cable = self._dspin(0.0, 100000.0, 1.0, 1, 0.0)
         self.amp_cathode_cable.setToolTip(
-            "Extra cathode-channel capacitance to ground [pF] from cable, connectors,\n"
-            "scope input, etc. Combined with the pad↔backplane capacitance it creates\n"
-            "the cathode-side input RC."
+            "Inert (kept for compatibility) [pF]. The former cathode-side input RC\n"
+            "low-pass has been removed — the faithful amplifier imposes no input RC."
         )
         self.amp_sample_ns = self._dspin(0.0, 100000.0, 0.5, 2, 0.0)
         self.amp_sample_ns.setToolTip(
@@ -351,10 +360,10 @@ class ConfigPanel(QScrollArea):
         amp_form.addRow("Gain [dB]",             self.amp_gain)
         amp_form.addRow("Input impedance [Ω]",   self.amp_zin)
         amp_form.addRow("Upper bandwidth [GHz]", self.amp_bw_high)
-        amp_form.addRow("Lower bandwidth [kHz]", self.amp_bw_low)
-        amp_form.addRow("Coupling cap [nF]",     self.amp_coupling)
-        amp_form.addRow("Wire series cap [pF]",  self.amp_wire_cap)
-        amp_form.addRow("Cathode cable cap [pF]", self.amp_cathode_cable)
+        amp_form.addRow("Lower bandwidth [kHz] (inert)", self.amp_bw_low)
+        amp_form.addRow("Coupling cap [nF] (legacy/unused)", self.amp_coupling)
+        amp_form.addRow("Wire series cap [pF] (inert)",  self.amp_wire_cap)
+        amp_form.addRow("Cathode cable cap [pF] (inert)", self.amp_cathode_cable)
         amp_form.addRow("Output sample [ns]",     self.amp_sample_ns)
         root_layout.addWidget(amp_box)
 
@@ -695,10 +704,12 @@ class ConfigPanel(QScrollArea):
 
     def _update_amplifier_widgets(self):
         on = self.amp_enable.isChecked()
-        for w in (self.amp_gain, self.amp_zin, self.amp_bw_high,
-                  self.amp_bw_low, self.amp_coupling, self.amp_wire_cap,
-                  self.amp_cathode_cable, self.amp_sample_ns):
+        for w in (self.amp_gain, self.amp_zin, self.amp_bw_high, self.amp_sample_ns):
             w.setEnabled(on)
+        # inert keys (kept for config compatibility) — always disabled
+        for w in (self.amp_coupling, self.amp_bw_low, self.amp_wire_cap,
+                  self.amp_cathode_cable):
+            w.setEnabled(False)
 
     # ── file dialogs ─────────────────────────────────────────────────────
 

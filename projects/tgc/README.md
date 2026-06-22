@@ -323,50 +323,48 @@ unchanged; the raw induced-current waveforms are always kept, and the amplifier
 output is written to **new** branches/profiles in mV.
 
 Datasheet parameters: current amplifier, gain **40 dB** (×100), analog bandwidth
-**10 kHz – 2 GHz**, input impedance **50 Ω**, AC-coupled input (**1 nF**),
-non-inverting bipolar, ±1 V linear output.  Per the hardware setup the **wire**
-input carries an **additional 470 pF capacitor in series**.
+**10 kHz – 2 GHz**, input impedance **50 Ω**, non-inverting bipolar, ±1 V linear
+output.  The CIVIDEC C2-TCT is a broadband **transimpedance** amplifier: within its
+band the output faithfully follows the input current — there is no differentiation.
+The simulation therefore models only the intrinsic upper-bandwidth roll-off and the
+I→V gain (note **i [fC/ns] ≡ i [µA]**, since fC/ns = 10⁻⁶ A):
 
-The amplifier is linear and time-invariant, so its effect is a filter cascade on
-the per-bin induced current (note **i [fC/ns] ≡ i [µA]**, since fC/ns = 10⁻⁶ A):
+> V_out(t) [mV] = G · R_in · LP_{2 GHz}[ i(t) ] · 10⁻³
 
-> V_out(t) [mV] = G · R_in · ( LP_{2 GHz} ∘ HP_{coupling} ∘ HP_{10 kHz} )[ i(t) ] · 10⁻³
-
-- **HP_coupling** — AC coupling from the series input capacitor and the 50 Ω input,
-  a one-pole high-pass with τ = R_in · C_series.  This is the element that
-  distinguishes the channels:
-  - cathode (pad): C = 1 nF → τ ≈ **50 ns**
-  - anode (wire): C = 470 pF ⊕ 1 nF = 320 pF → τ ≈ **16 ns** (faster baseline
-    restoration / more differentiation than the pad)
-- **HP_10 kHz** — the amplifier's intrinsic lower band edge, τ = 1/(2π·10 kHz) ≈
-  15.9 µs (a slow droop; negligible in short windows, visible in long ones).
 - **LP_2 GHz** — the upper band edge, τ = 1/(2π·2 GHz) ≈ 0.08 ns (smooths sub-ns
   features; only matters at very fine `time_step_ns`).
 - **Scaling** — G = 10^(40/20) = 100 and R_in = 50 Ω give **V_out [mV] = 5 · i [fC/ns]**.
 
-A one-pole high-pass is exactly the recursion already used for the resistive
-relaxation (`i_out = i − (1/τ)·lowpass_τ(i)`); the low-pass is the standard
-`y[k] = b·y[k−1] + (1−b)·x[k]`, `b = e^{−Δt/τ}`.  The chain is applied to the
-post-relaxation pad current and the raw wire current (the electronics sit after
-the detector).  No noise term is included (the model is deterministic; the ~4 µA
-spike dwarfs the 0.4 µA rms input noise anyway).
+so V_out faithfully reproduces the detector-current shape on each channel (fast
+electron spike *and* slow ion tail).  The measured **charge** pulse — what a
+charge-integrating readout records — is reproduced by **integrating** the amplifier
+output, V_int(t) = ∫₀ᵗ V_out dt′ [mV·ns] ∝ Q(t): a monotonic step that rises to the
+collected charge.  Both are written — the faithful current as `anode_amp` /
+`cathode_amp` (profiles `p_anode_amp` / `p_cathode_amp`) and its integral as
+`anode_amp_int` / `cathode_amp_int` (profiles `p_anode_amp_int` / `p_cathode_amp_int`).
 
-Note that this **fast** current amplifier **keeps the electron spike**: a high-pass
-passes fast signals and a 2 GHz roll-off does not smear a ~1 ns feature, so the
-amplifier output still shows the spike on both channels.  The absence of the spike
-in measured data therefore comes from elsewhere (input loading, grounding, the
-actual ρ_s) — see *Why the electron spike appears on the simulated cathode* above.
+The low-pass is the standard `y[k] = b·y[k−1] + (1−b)·x[k]`, `b = e^{−Δt/τ}`, applied
+to the post-relaxation pad current and the raw wire current (the electronics sit after
+the detector); no noise term is included (deterministic model).  The input-network
+config keys — `coupling_cap_nf`, `wire_series_cap_pf`, `cathode_cable_cap_pf`,
+`pad_area_cm2` and `bandwidth_low_hz` — are now **inert** (kept only for backward
+compatibility with older JSON files): the amplifier is treated only by its upper
+bandwidth and gain, with no input-network RC and no low-frequency high-pass.  The
+wire's 470 pF series capacitor is a real **detector** HV-decoupling component (the
+wire sits at +1900 V); at the real input impedance it does not differentiate the
+signal on the relevant timescale, so it is not applied as an amplifier high-pass.
 
-To model that "elsewhere", the cathode channel supports two optional
-measurement-chain terms without changing the Garfield weighting field itself:
-`readout.pad_area_cm2` sets the finite readout-pad area used to compute the
-pad ↔ grounded-backplane capacitance (when `ground_plane_enabled = true`), and
-`amplifier.cathode_cable_cap_pf` adds lumped cable/scope capacitance.  Together
-they create a cathode-side input RC low-pass before the current amplifier.
-The resistive sheet itself does **not** enter this extra amplifier RC; its effect
-remains on the Garfield side through the α-scaled weighting potential and the
-optional delayed-relaxation filter.  `amplifier.output_sample_ns` then applies a
-boxcar average to mimic the finite acquisition aperture of the digitizer.
+This **faithful** current amplifier **keeps the electron spike** on both channels (a
+transimpedance amp with a 2 GHz roll-off does not smear a ~1 ns feature).  The fact
+that a charge-integrating measurement shows no fast spike is reproduced not by shaping
+the current but by **integrating** it (above): in the charge step the brief spike
+contributes only its small charge, so it is invisible against the slow ion rise.
+(An earlier model added a cathode-side input RC low-pass from `pad_area_cm2` /
+`cathode_cable_cap_pf` to suppress the prompt pad spike; that loading term has been
+removed — the amplifier no longer imposes any input-network RC, so those keys are now
+inert.  The ground-plane keys still affect the Garfield side through the α-scaled
+weighting potential.)  `amplifier.output_sample_ns` still applies a boxcar average to
+the output to mimic the finite acquisition aperture of the digitizer.
 
 ---
 
@@ -570,7 +568,7 @@ All parameters live in a JSON file (default: `config/default_tgc.json`).
 | `insulator_thickness_um`       | float  | μm    | 100.0           | Thickness of the insulating substrate between the resistive layer and the conductive pads. Affects both the dielectric correction factor α and the time constant τ. Ignored when `type = "conductive"` |
 | `surface_resistivity_ohm_sq`   | float  | Ω/sq  | 500000.0        | Sheet resistance of the resistive layer. Enters only the time constant τ (does not affect the static field or α). Ignored when `type = "conductive"` |
 | `resistive_layer_size_cm`      | float  | cm    | 20.0            | Across-wire size of the square resistive sheet. The two grounded edges parallel to the wires are this far apart, so it sets the relaxation time `τ ∝ size²`. Ignored when `type = "conductive"` |
-| `pad_area_cm2`                 | float  | cm²   | 0.0             | Finite readout-pad area used **only** for the downstream cathode amplifier RC model. When `ground_plane_enabled = true`, it sets the pad ↔ backplane capacitance together with `ground_plane_insulator_*`; otherwise it has no amplifier-side effect. It does **not** change the Garfield weighting field, which remains the infinite cathode plane; use a boundary-element/FEM solve for true finite-pad induction |
+| `pad_area_cm2`                 | float  | cm²   | 0.0             | **Inert** (kept for compatibility). It fed only the former cathode amplifier-input RC, which the faithful transimpedance model no longer applies. It never changed the Garfield weighting field (still the infinite cathode plane; use a boundary-element/FEM solve for true finite-pad induction). The ground-plane keys still affect the α weighting divider |
 | `enable_delayed_signal`        | bool   | —     | `true`          | When `true`, the exp(−t/τ) resistive relaxation is applied to the pad waveform as an exact exponential post-filter (negligible cost). When `false`, only the static α-corrected weighting potential is used — no relaxation tail. Ignored when `type = "conductive"` |
 | `ground_plane_enabled`         | bool   | —     | `false`         | Add a grounded plane below the readout pad (resistive only). It adds a pad-to-ground capacitance `C_gnd` that lowers the weighting-potential factor α (`α = C_ins/(C_ins+C_gap+C_gnd)`), reducing the pad signal. Does not change the DC field or τ. No effect when `type = "conductive"` (the solid grounded cathode shields it — a note is printed) |
 | `ground_plane_insulator_um`    | float  | μm    | 1000.0          | Thickness of the pad ↔ ground-plane insulator (default 1 mm). Used only when `ground_plane_enabled` |
@@ -583,15 +581,15 @@ Physics § 5. All keys are ignored when `enable = false`.
 
 | Key                    | Type   | Unit | Default      | Description |
 |------------------------|--------|------|--------------|-------------|
-| `enable`               | bool   | —    | `false`      | When `true`, produce the amplifier output voltage [mV] for the anode (wire) and cathode (pad) channels as the `anode_amp` / `cathode_amp` branches and `p_anode_amp` / `p_cathode_amp` profiles. When `false`, those outputs are zero and the run is byte-for-byte identical to one built without this feature |
+| `enable`               | bool   | —    | `false`      | When `true`, produce the amplifier output voltage [mV] for the anode (wire) and cathode (pad) channels as the `anode_amp` / `cathode_amp` branches and `p_anode_amp` / `p_cathode_amp` profiles, plus its running integral [mV·ns] as `anode_amp_int` / `cathode_amp_int` and `p_anode_amp_int` / `p_cathode_amp_int` (the charge pulse). When `false`, those outputs are zero and the run is byte-for-byte identical to one built without this feature |
 | `gain_db`              | float  | dB   | 40.0         | Voltage gain (40 dB = ×100). Sets the output scale V_out[mV] = 10^(gain_db/20)·R_in·i[µA]·10⁻³ |
-| `input_impedance_ohm`  | float  | Ω    | 50.0         | Amplifier input impedance. Sets the AC-coupling high-pass τ = R_in·C and the output scale |
-| `bandwidth_high_hz`    | float  | Hz   | 2.0e9        | Upper −3 dB band edge → input low-pass τ = 1/(2π·f). Smooths sub-ns features; only significant at very small `time_step_ns` |
-| `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | Lower −3 dB band edge → high-pass τ = 1/(2π·f) ≈ 15.9 µs. Slow baseline droop, visible only in long time windows |
-| `coupling_cap_nf`      | float  | nF   | 1.0          | AC-coupling capacitor at the input. With R_in sets the pad high-pass τ (1 nF, 50 Ω → 50 ns) |
-| `wire_series_cap_pf`   | float  | pF   | 470.0        | Extra series capacitor on the **anode (wire)** input only; in series with the coupling cap (470 pF ⊕ 1 nF = 320 pF) it gives the wire channel a shorter high-pass τ ≈ 16 ns |
-| `cathode_cable_cap_pf` | float  | pF   | 0.0          | Extra capacitance to ground on the cathode channel (cable, connectors, scope input, etc.). Together with the pad ↔ backplane capacitance implied by `readout.pad_area_cm2` and `ground_plane_insulator_*`, it creates a cathode-side input low-pass that can suppress the prompt pad spike. The resistive sheet is not part of this amplifier-side RC term |
-| `output_sample_ns`     | float  | ns   | 0.0          | Finite acquisition aperture applied as a boxcar average on the amplifier output. Use this to mimic digitizer sampling that further averages down sub-ns features after the analog front end |
+| `input_impedance_ohm`  | float  | Ω    | 50.0         | Amplifier input impedance. Sets the transimpedance output scale V_out = gain·R_in·i |
+| `bandwidth_high_hz`    | float  | Hz   | 2.0e9        | Upper −3 dB band edge → low-pass τ = 1/(2π·f). Smooths sub-ns features; only significant at very small `time_step_ns`. The only filter the amplifier applies |
+| `bandwidth_low_hz`     | float  | Hz   | 1.0e4        | **Inert** (kept for compatibility). The faithful transimpedance model applies no low-frequency high-pass |
+| `coupling_cap_nf`      | float  | nF   | 1.0          | **Inert** (kept for compatibility). Not used by the faithful amplifier model |
+| `wire_series_cap_pf`   | float  | pF   | 470.0        | **Inert** (kept for compatibility). The 470 pF is a real **detector** HV-decoupling capacitor on the wire; at the real input impedance it does not differentiate on the signal timescale, so it is not applied as an amplifier high-pass |
+| `cathode_cable_cap_pf` | float  | pF   | 0.0          | **Inert** (kept for compatibility). The earlier cathode-side input low-pass has been removed — the faithful amplifier imposes no input-network RC |
+| `output_sample_ns`     | float  | ns   | 0.0          | Finite acquisition aperture applied as a boxcar average on the amplifier output. Mimics digitizer sampling that further averages down sub-ns features after the analog front end |
 
 ### `source`
 
@@ -692,6 +690,8 @@ the literal `dist_rnd`.
 | `p_cathode_ion`         | TProfile | Ion-only component of the cathode current vs time [fC/ns] |
 | `p_anode_amp`           | TProfile | Mean anode amplifier output vs time [mV] (zero unless `amplifier.enable`) |
 | `p_cathode_amp`         | TProfile | Mean cathode amplifier output vs time [mV] (zero unless `amplifier.enable`) |
+| `p_anode_amp_int`       | TProfile | Running integral ∫V_anode dt vs time [mV·ns] — the anode charge pulse (zero unless `amplifier.enable`) |
+| `p_cathode_amp_int`     | TProfile | Running integral ∫V_cathode dt vs time [mV·ns] — the cathode charge pulse (zero unless `amplifier.enable`) |
 
 **Summary graphs (in `summary/`):**
 
@@ -714,6 +714,7 @@ the literal `dist_rnd`.
 | `anode_e` / `anode_i` | vector\<float\> | Electron / ion component of the anode current [fC/ns]; the two sum to `anode` bin-by-bin |
 | `cathode_e` / `cathode_i` | vector\<float\> | Electron / ion component of the cathode current [fC/ns]; the two sum to `cathode` |
 | `anode_amp` / `cathode_amp` | vector\<float\> | Amplifier output voltage [mV] for the anode (wire) and cathode (pad) channels; present in every file but zero unless `amplifier.enable` (see Physics § 5) |
+| `anode_amp_int` / `cathode_amp_int` | vector\<float\> | Running integral ∫V dt [mV·ns] of the amplifier output — the charge pulse; zero unless `amplifier.enable` |
 | `primary_x/y/z` | vector\<float\> | 3D points along the primary electron drift path [cm]. 2 points (start + end) when `store_drift_lines = false`; full collision-step trajectory when `true` |
 | `cloud_x/y/z` | vector\<float\> | Start positions of secondary (avalanche) electron tracks [cm], up to 500 points |
 | `ion_x/y/z` | vector\<float\> | Flattened ion drift paths [cm], up to 100 ions |

@@ -8,16 +8,19 @@
     "sense_wires": null
   },
   "readout": {
-    "type": "conductive",
+    "type": "resistive",
     "insulator_material": "kapton",
     "insulator_thickness_um": 100.0,
     "surface_resistivity_ohm_sq": 500000.0,
     "resistive_layer_size_cm": 20.0,
-    "pad_area_cm2": 0.0,
-    "enable_delayed_signal": true
+    "pad_area_cm2": 25.0,
+    "enable_delayed_signal": true,
+    "ground_plane_enabled": true,
+    "ground_plane_insulator_um": 1000.0,
+    "ground_plane_insulator_material": "fr4"
   },
   "amplifier": {
-    "enable": false,
+    "enable": true,
     "gain_db": 40.0,
     "input_impedance_ohm": 50.0,
     "bandwidth_high_hz": 2000000000.0,
@@ -58,6 +61,7 @@
     "time_step_ns": 0.1,
     "enable_ion_drift": true,
     "store_drift_lines": true,
-    "ion_max_step_um": 5.0
+    "ion_max_step_um": 5.0,
+    "random_seed": 0
   }
 }
