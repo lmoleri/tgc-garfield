@@ -21,6 +21,12 @@ projects/*/*.root
 # parallel_plate has its own git repo; exclude from this workspace repo
 projects/parallel_plate/
 
+# LaTeX build artifacts (the .tex is the source of truth)
+projects/*/docs/*.pdf
+**/*.aux
+**/*.synctex.gz
+projects/*/docs/*.log
+
 # Python bytecode
 **/__pycache__/
 **/*.pyc
