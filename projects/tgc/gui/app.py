@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -258,9 +259,10 @@ class ConfigPanel(QScrollArea):
         )
         self.pad_area = self._dspin(0.0, 1000.0, 0.5, 2, 0.0)
         self.pad_area.setToolTip(
-            "Pickup-pad area [cm²] used only for the cathode amplifier RC model.\n"
-            "With a grounded backplane below the pad it sets the pad↔backplane\n"
-            "capacitance. It does not change the Garfield weighting field."
+            "Pickup-pad area [cm²]. With a grounded backplane below the pad it sets the\n"
+            "pad↔backplane capacitance C_pad = ε₀ε_r·A/d, which sinks fast current into\n"
+            "the amplifier input (cathode low-pass τ = R_in·C_pad → rolls off the spike).\n"
+            "It does not change the Garfield weighting field."
         )
 
         self.delayed_signal_cb = QCheckBox()
@@ -276,9 +278,11 @@ class ConfigPanel(QScrollArea):
         self.ground_plane_cb.setChecked(False)
         self.ground_plane_cb.setToolTip(
             "Add a grounded plane below the readout pad, separated by the insulator\n"
-            "below. It adds a pad-to-ground capacitance that reduces the pad signal\n"
-            "(scales the weighting-potential factor α). Resistive readout only —\n"
-            "in conductive mode the solid grounded cathode shields the backplane."
+            "below. It adds a pad-to-ground capacitance that both reduces the pad signal\n"
+            "(scales the weighting-potential factor α) and, with the amplifier on, sinks\n"
+            "fast current into R_in (cathode low-pass τ = R_in·C_pad → spike roll-off).\n"
+            "Resistive readout only — in conductive mode the solid grounded cathode\n"
+            "shields the backplane."
         )
         self.ground_plane_thickness = self._dspin(1.0, 100000.0, 100.0, 1, 1000.0)
         self.ground_plane_thickness.setToolTip(
@@ -318,7 +322,8 @@ class ConfigPanel(QScrollArea):
             "anode (wire) and cathode (pad) waveforms, producing the output voltage\n"
             "[mV] as new branches. Off (default) leaves the run byte-for-byte\n"
             "unchanged. Faithful transimpedance model: V_out ∝ i(t) (2 GHz upper\n"
-            "bandwidth + gain only, no differentiation); the running integral\n"
+            "bandwidth + gain, no differentiation); the cathode is additionally rolled\n"
+            "off by the pad↔backplane capacitance (τ = R_in·C_pad). The running integral\n"
             "∫V dt [mV·ns] (the charge pulse) is also written. Raw current is kept."
         )
 
@@ -347,8 +352,9 @@ class ConfigPanel(QScrollArea):
         )
         self.amp_cathode_cable = self._dspin(0.0, 100000.0, 1.0, 1, 0.0)
         self.amp_cathode_cable.setToolTip(
-            "Inert (kept for compatibility) [pF]. The former cathode-side input RC\n"
-            "low-pass has been removed — the faithful amplifier imposes no input RC."
+            "Inert (kept for compatibility) [pF]. The cathode input low-pass is driven\n"
+            "by the geometric pad↔backplane capacitance (pad area + ground plane), not\n"
+            "by this cable value."
         )
         self.amp_sample_ns = self._dspin(0.0, 100000.0, 0.5, 2, 0.0)
         self.amp_sample_ns.setToolTip(
@@ -369,6 +375,74 @@ class ConfigPanel(QScrollArea):
 
         self._update_amplifier_widgets()
         self.amp_enable.toggled.connect(self._update_amplifier_widgets)
+
+        # ── Element impedances |Z(f)| ─────────────────────────────────────
+        # Read-only: auto-computed impedance of each readout-chain element at two
+        # reference frequencies (a slow "tail" band and a fast "spike" band), so the
+        # front-end's frequency dependence is visible.  Mirrors the C++
+        # ComputePadBackplaneCapPf / ComputeResistiveParams / ComputeAmplifierParams.
+        imp_box = QGroupBox("Element impedances |Z(f)|")
+        imp_v   = QVBoxLayout(imp_box)
+        imp_v.setContentsMargins(6, 6, 6, 6)
+
+        freq_row = QWidget()
+        freq_h   = self._left_row_layout(freq_row)
+        self.imp_f_slow = self._dspin(1e-3, 1e6, 1.0, 3, 1.0)      # MHz (tail band)
+        self.imp_f_fast = self._dspin(1e-3, 1e6, 10.0, 1, 1000.0)  # MHz (spike band)
+        self.imp_f_slow.setToolTip("Slow / tail reference frequency [MHz] for the |Z| columns.")
+        self.imp_f_fast.setToolTip("Fast / spike reference frequency [MHz] for the |Z| columns.")
+        freq_h.addWidget(QLabel("Ref f slow [MHz]"))
+        freq_h.addWidget(self.imp_f_slow)
+        freq_h.addWidget(QLabel("fast [MHz]"))
+        freq_h.addWidget(self.imp_f_fast)
+        imp_v.addWidget(freq_row)
+
+        grid_w = QWidget()
+        grid   = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        hdr_elem = QLabel("Element")
+        hdr_val  = QLabel("C / R")
+        self.imp_hdr_slow = QLabel("|Z| @ f_slow")
+        self.imp_hdr_fast = QLabel("|Z| @ f_fast")
+        for c, w in enumerate((hdr_elem, hdr_val, self.imp_hdr_slow, self.imp_hdr_fast)):
+            f = w.font(); f.setBold(True); w.setFont(f)
+            grid.addWidget(w, 0, c)
+
+        self._imp_rows = {}   # key -> (value_label, z_slow_label, z_fast_label)
+        elements = [
+            ("padgnd",   "Pad ↔ ground plane (sink)"),
+            ("cins",     "Pad ↔ resistive layer"),
+            ("cgap",     "Pad ↔ gas gap"),
+            ("coupling", "Coupling cap"),
+            ("cable",    "Cathode cable cap"),
+            ("sheet",    "Resistive sheet"),
+            ("rin",      "Amplifier input R_in"),
+        ]
+        for r, (key, name) in enumerate(elements, start=1):
+            grid.addWidget(QLabel(name), r, 0)
+            v, zs, zf = QLabel("—"), QLabel("—"), QLabel("—")
+            grid.addWidget(v,  r, 1)
+            grid.addWidget(zs, r, 2)
+            grid.addWidget(zf, r, 3)
+            self._imp_rows[key] = (v, zs, zf)
+        imp_v.addWidget(grid_w)
+
+        self.imp_summary = QLabel("—")
+        self.imp_summary.setWordWrap(True)
+        imp_v.addWidget(self.imp_summary)
+        root_layout.addWidget(imp_box)
+
+        for w in (self.imp_f_slow, self.imp_f_fast, self.insulator_thickness,
+                  self.surface_resistivity, self.resistive_layer_size, self.pad_area,
+                  self.gap_cm, self.ground_plane_thickness, self.amp_zin,
+                  self.amp_coupling, self.amp_cathode_cable):
+            w.valueChanged.connect(self._update_impedance_labels)
+        for w in (self.readout_type, self.insulator_material, self.ground_plane_material):
+            w.currentIndexChanged.connect(self._update_impedance_labels)
+        self.ground_plane_cb.toggled.connect(self._update_impedance_labels)
+        self._update_impedance_labels()
 
         # ── Source ────────────────────────────────────────────────────────
         src_box  = QGroupBox("Source")
@@ -711,6 +785,154 @@ class ConfigPanel(QScrollArea):
                   self.amp_cathode_cable):
             w.setEnabled(False)
 
+    # ── element impedances |Z(f)| ────────────────────────────────────────
+
+    @staticmethod
+    def _insulator_eps_r(name: str) -> float:
+        """Relative permittivity of a named insulator (mirrors C++ InsulatorEpsR)."""
+        n = name.strip().lower()
+        if n == "fr4":
+            return 4.6
+        if n == "air":
+            return 1.0
+        return 3.5  # kapton (default)
+
+    @staticmethod
+    def _fmt_ohm(z: float) -> str:
+        if z is None or z <= 0 or not math.isfinite(z):
+            return "—"
+        if z >= 1e9:
+            return f"{z / 1e9:.2f} GΩ"
+        if z >= 1e6:
+            return f"{z / 1e6:.2f} MΩ"
+        if z >= 1e3:
+            return f"{z / 1e3:.2f} kΩ"
+        if z >= 1.0:
+            return f"{z:.1f} Ω"
+        return f"{z * 1e3:.1f} mΩ"
+
+    @staticmethod
+    def _fmt_cap(c_farad: float) -> str:
+        if c_farad is None or c_farad <= 0 or not math.isfinite(c_farad):
+            return "—"
+        pf = c_farad * 1e12
+        if pf >= 1e6:
+            return f"{pf / 1e6:.3f} µF"
+        if pf >= 1e3:
+            return f"{pf / 1e3:.3f} nF"
+        return f"{pf:.3f} pF"
+
+    @staticmethod
+    def _fmt_freq(f_mhz: float) -> str:
+        if f_mhz >= 1000.0:
+            return f"{f_mhz / 1000.0:.3g} GHz"
+        if f_mhz >= 1.0:
+            return f"{f_mhz:.3g} MHz"
+        return f"{f_mhz * 1e3:.3g} kHz"
+
+    def _update_impedance_labels(self):
+        """Auto-compute each readout element's |Z| at the two reference frequencies.
+
+        Mirrors the C++ ComputePadBackplaneCapPf / ComputeResistiveParams /
+        ComputeAmplifierParams; the C++ stdout (C_pad, τ_in, f_c) is the source of
+        truth. Absolute capacitances need a pad area; frequency-flat elements
+        (resistances) show the same value in both |Z| columns.
+        """
+        eps0 = 8.854e-12  # F/m
+        resistive = self.readout_type.currentText() == "Resistive"
+        A_m2 = self.pad_area.value() * 1e-4          # cm² → m²
+        f_slow_hz = self.imp_f_slow.value() * 1e6
+        f_fast_hz = self.imp_f_fast.value() * 1e6
+        R_in = self.amp_zin.value()
+        need_area = A_m2 > 0.0
+
+        self.imp_hdr_slow.setText(f"|Z| @ {self._fmt_freq(self.imp_f_slow.value())}")
+        self.imp_hdr_fast.setText(f"|Z| @ {self._fmt_freq(self.imp_f_fast.value())}")
+
+        def z_of_cap(c_farad, f_hz):
+            if c_farad <= 0 or f_hz <= 0:
+                return None
+            return 1.0 / (2.0 * math.pi * f_hz * c_farad)
+
+        def set_cap_row(key, c_farad):
+            v, zs, zf = self._imp_rows[key]
+            v.setText(self._fmt_cap(c_farad))
+            zs.setText(self._fmt_ohm(z_of_cap(c_farad, f_slow_hz)))
+            zf.setText(self._fmt_ohm(z_of_cap(c_farad, f_fast_hz)))
+
+        def set_flat_row(key, r_ohm, suffix=""):
+            v, zs, zf = self._imp_rows[key]
+            txt = self._fmt_ohm(r_ohm) + suffix
+            v.setText(txt)
+            zs.setText(txt)
+            zf.setText(txt)
+
+        def clear_row(key, note="—"):
+            v, zs, zf = self._imp_rows[key]
+            v.setText(note)
+            zs.setText("—")
+            zf.setText("—")
+
+        # Pad ↔ ground plane (the current sink): resistive + ground plane + pad area.
+        c_padgnd = 0.0
+        if resistive and self.ground_plane_cb.isChecked() and need_area:
+            eps_r = self._insulator_eps_r(self.ground_plane_material.currentText())
+            d = self.ground_plane_thickness.value() * 1e-6
+            c_padgnd = eps0 * eps_r * A_m2 / d if d > 0 else 0.0
+            set_cap_row("padgnd", c_padgnd)
+        else:
+            clear_row("padgnd", "— (needs resistive + ground plane + pad area)")
+
+        # Pad ↔ resistive layer (C_ins): resistive + pad area.
+        if resistive and need_area:
+            eps_r = self._insulator_eps_r(self.insulator_material.currentText())
+            d = self.insulator_thickness.value() * 1e-6
+            set_cap_row("cins", eps0 * eps_r * A_m2 / d if d > 0 else 0.0)
+        else:
+            clear_row("cins", "— (needs resistive + pad area)")
+
+        # Pad ↔ gas gap (C_gap): pad area (ε_r = 1).
+        if need_area:
+            gap = self.gap_cm.value() * 1e-2
+            set_cap_row("cgap", eps0 * A_m2 / gap if gap > 0 else 0.0)
+        else:
+            clear_row("cgap", "— (set pad area)")
+
+        # Coupling cap (legacy/unused for the filter; shown for reference).
+        set_cap_row("coupling", self.amp_coupling.value() * 1e-9)
+
+        # Cathode cable cap (inert; shown when nonzero).
+        cable = self.amp_cathode_cable.value() * 1e-12
+        if cable > 0:
+            set_cap_row("cable", cable)
+        else:
+            clear_row("cable", "0")
+
+        # Resistive sheet: frequency-flat sheet resistance [Ω/sq].
+        if resistive:
+            set_flat_row("sheet", self.surface_resistivity.value() * 1e3, "/sq")
+        else:
+            clear_row("sheet")
+
+        # Amplifier input impedance (frequency-flat).
+        set_flat_row("rin", R_in)
+
+        # Summary: the pad-cap current-sink low-pass corner (the Point-1 knob).
+        if c_padgnd > 0 and R_in > 0:
+            tau_ns = R_in * c_padgnd * 1e9                       # R[Ω]·C[F] → s → ns
+            fc_mhz = 1.0 / (2.0 * math.pi * R_in * c_padgnd) / 1e6
+            self.imp_summary.setText(
+                f"Cathode current sink: C_pad = {self._fmt_cap(c_padgnd)}, "
+                f"τ_in = R_in·C_pad = {tau_ns:.3g} ns → f_c ≈ {self._fmt_freq(fc_mhz)} "
+                f"(|Z_pad| = R_in at f_c). Enable the amplifier to apply it."
+            )
+        else:
+            self.imp_summary.setText(
+                "Cathode current sink inactive (needs resistive mode + ground plane "
+                "+ pad area). With those set, C_pad rolls off the fast spike; "
+                "τ_in = R_in·C_pad."
+            )
+
     # ── file dialogs ─────────────────────────────────────────────────────
 
     def _browse_out_dir(self):
@@ -866,6 +1088,7 @@ class ConfigPanel(QScrollArea):
         self.amp_cathode_cable.setValue(amp.get("cathode_cable_cap_pf", 0.0))
         self.amp_sample_ns.setValue(    amp.get("output_sample_ns", 0.0))
         self._update_amplifier_widgets()
+        self._update_impedance_labels()
 
         s = d.get("source", {})
         self.energy_kev.setValue(s.get("energy_keV", 5.9))

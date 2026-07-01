@@ -329,10 +329,21 @@ band the output faithfully follows the input current — there is no differentia
 The simulation therefore models only the intrinsic upper-bandwidth roll-off and the
 I→V gain (note **i [fC/ns] ≡ i [µA]**, since fC/ns = 10⁻⁶ A):
 
-> V_out(t) [mV] = G · R_in · LP_{2 GHz}[ i(t) ] · 10⁻³
+> anode:   V_out(t) [mV] = G · R_in · LP_{2 GHz}[ i(t) ] · 10⁻³
+> cathode: V_out(t) [mV] = G · R_in · LP_{2 GHz}[ LP_{pad}[ i(t) ] ] · 10⁻³
 
 - **LP_2 GHz** — the upper band edge, τ = 1/(2π·2 GHz) ≈ 0.08 ns (smooths sub-ns
   features; only matters at very fine `time_step_ns`).
+- **LP_pad** (cathode only) — the pad ↔ grounded-backplane capacitance
+  C_pad = ε₀ε_r·A/d sinks fast current into the R_in load: a one-pole low-pass with
+  τ_in = R_in · C_pad (corner f_c = 1/(2π·R_in·C_pad)).  Unlike the flat gain this is a
+  genuine **frequency-dependent** attenuation — it rolls off the sub-ns electron spike
+  while leaving the µs ion tail untouched (the larger the pad or the thinner the
+  backplane, the stronger the roll-off).  Active only in resistive mode with a pad area
+  (`readout.pad_area_cm2`) and a ground plane (`readout.ground_plane_enabled`); it is
+  zero otherwise, so the wire channel and default runs are unaffected.  C_pad, τ_in and
+  f_c are printed at startup and shown live in the GUI's **Element impedances |Z(f)|**
+  panel.
 - **Scaling** — G = 10^(40/20) = 100 and R_in = 50 Ω give **V_out [mV] = 5 · i [fC/ns]**.
 
 so V_out faithfully reproduces the detector-current shape on each channel (fast
@@ -345,26 +356,28 @@ collected charge.  Both are written — the faithful current as `anode_amp` /
 
 The low-pass is the standard `y[k] = b·y[k−1] + (1−b)·x[k]`, `b = e^{−Δt/τ}`, applied
 to the post-relaxation pad current and the raw wire current (the electronics sit after
-the detector); no noise term is included (deterministic model).  The input-network
-config keys — `coupling_cap_nf`, `wire_series_cap_pf`, `cathode_cable_cap_pf`,
-`pad_area_cm2` and `bandwidth_low_hz` — are now **inert** (kept only for backward
-compatibility with older JSON files): the amplifier is treated only by its upper
-bandwidth and gain, with no input-network RC and no low-frequency high-pass.  The
-wire's 470 pF series capacitor is a real **detector** HV-decoupling component (the
+the detector); no noise term is included (deterministic model).  The cathode sink uses
+the same one-pole form with τ_in (above).  The remaining input-network config keys —
+`coupling_cap_nf`, `wire_series_cap_pf`, `cathode_cable_cap_pf` and `bandwidth_low_hz`
+— are **inert** (kept only for backward compatibility with older JSON files): no
+AC-coupling high-pass, no cable-loading term and no low-frequency high-pass are applied.
+The wire's 470 pF series capacitor is a real **detector** HV-decoupling component (the
 wire sits at +1900 V); at the real input impedance it does not differentiate the
 signal on the relevant timescale, so it is not applied as an amplifier high-pass.
 
-This **faithful** current amplifier **keeps the electron spike** on both channels (a
-transimpedance amp with a 2 GHz roll-off does not smear a ~1 ns feature).  The fact
-that a charge-integrating measurement shows no fast spike is reproduced not by shaping
-the current but by **integrating** it (above): in the charge step the brief spike
-contributes only its small charge, so it is invisible against the slow ion rise.
-(An earlier model added a cathode-side input RC low-pass from `pad_area_cm2` /
-`cathode_cable_cap_pf` to suppress the prompt pad spike; that loading term has been
-removed — the amplifier no longer imposes any input-network RC, so those keys are now
-inert.  The ground-plane keys still affect the Garfield side through the α-scaled
-weighting potential.)  `amplifier.output_sample_ns` still applies a boxcar average to
-the output to mimic the finite acquisition aperture of the digitizer.
+Without a pad-capacitance sink the **faithful** current amplifier **keeps the electron
+spike** on both channels (a transimpedance amp with a 2 GHz roll-off does not smear a
+~1 ns feature); a charge-integrating measurement then shows no fast spike simply because
+**integrating** the current (above) buries the brief spike's small charge under the slow
+ion rise.  With a pad area and a ground plane, the cathode additionally sees the pad ↔
+backplane capacitance C_pad as a high-frequency current sink (LP_pad above): this is the
+physical mechanism that suppresses the prompt pad spike in *current*, and unlike a flat
+gain it attenuates the fast spike far more than the slow tail.  It is driven
+**geometrically** by `readout.pad_area_cm2`, `readout.ground_plane_insulator_um` and
+`readout.ground_plane_insulator_material` (not by `cathode_cable_cap_pf`); the same
+ground-plane keys also scale the Garfield-side α weighting potential.
+`amplifier.output_sample_ns` still applies a boxcar average to the output to mimic the
+finite acquisition aperture of the digitizer.
 
 ---
 
