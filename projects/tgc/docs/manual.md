@@ -33,12 +33,13 @@ number, so the references survive edits — open `src/tgc_sim.cc` and search.
 
 A **TGC** (Thin Gap Chamber) is a multiwire proportional chamber run in a **quasi-saturated** mode: a
 plane of thin anode wires (Ø ≈ 50 µm) at ≈ 1.8 mm pitch sits midway between two graphite-coated
-cathode planes only ≈ 1.4 mm away on each side. The defining feature is that the wire-to-cathode
-distance is *smaller* than the wire pitch — the "thin gap" — which, with a heavily quenched Ar/CO₂
-mixture at ≈ 1900 V, gives fast ns-scale signals and good time resolution. That is why the ATLAS muon
-spectrometer uses TGCs for the endcap Level-1 trigger. The chamber reads out two electrodes: the
-**anode wires** (timing) and a segmented **cathode pad** (position), optionally behind a **resistive**
-graphite layer.
+cathode planes only ≈ 1.4 mm away on each side.
+
+The defining feature is in the name: the wire-to-cathode distance is *smaller* than the wire pitch.
+With a heavily quenched Ar/CO₂ mixture at ≈ 1900 V, that thin gap gives fast ns-scale signals and
+good time resolution — which is why the ATLAS muon spectrometer uses TGCs for the endcap Level-1
+trigger. The chamber reads out two electrodes: the **anode wires** (timing) and a segmented
+**cathode pad** (position), optionally behind a **resistive** graphite layer.
 
 The binary `tgc_sim` computes, for a given geometry, gas and bias:
 
@@ -69,7 +70,7 @@ field goes as $1/r$ and climbs to tens of kV/cm. Transport parameters (drift vel
 Townsend $\alpha$, attachment $\eta$) come from a **Magboltz** table tabulated vs $|E|$ (`SetupGas`).
 
 **Multiplication.** Close to the wire $\alpha$ dominates and the electron number grows as
-$\exp\!\big(\int \alpha\,\mathrm{d}s\big)$; `AvalancheMicroscopic` transports collision-by-collision
+$`\exp\!\big(\int \alpha\,\mathrm{d}s\big)`$; `AvalancheMicroscopic` transports collision-by-collision
 and `GetAvalancheSize` returns $\langle n_e\rangle$. CO₂ is an electronegative quencher, so some
 electrons **attach** ($\eta$) and a fraction of events barely multiply. The high field plus strong
 quench put the chamber in the **quasi-saturated** regime characteristic of TGCs.
@@ -80,10 +81,10 @@ motion carries most of the induced *charge*. `DriftLineRKF` transports each ion 
 `enable_ion_drift` is set (§7–8).
 
 **Induced signal (Shockley–Ramo).** A charge $q$ moving through $\mathrm{d}\vec{r}$ induces on
-electrode $i$ a current $i_i = -q\,\vec{v}\cdot\vec{E}_{w,i}$, equivalently a charge increment
-$\mathrm{d}Q_i = -q\,\mathrm{d}W_i$, where $W_i$ is the **weighting potential** of electrode $i$ (1 V
+electrode $i$ a current $`i_i = -q\,\vec{v}\cdot\vec{E}_{w,i}`$, equivalently a charge increment
+$`\mathrm{d}Q_i = -q\,\mathrm{d}W_i`$, where $W_i$ is the **weighting potential** of electrode $i$ (1 V
 on $i$, 0 V on all others, no space charge). The three TGC electrodes satisfy
-$Q_\mathrm{anode} + Q_\mathrm{cathode} + Q_\mathrm{cathode\_top} = 0$. The anode sees a fast electron
+$`Q_\mathrm{anode} + Q_\mathrm{cathode} + Q_\mathrm{cathode\_top} = 0`$. The anode sees a fast electron
 spike then a slow ion tail; the cathode sees mostly the slow ion rise plus a small prompt spike (§5).
 
 The observables the code produces: **avalanche size**, **fate / interaction fraction**, and the
@@ -162,24 +163,31 @@ Because the geometry is a periodic wire plane between two ground planes, `Compon
 returns the drift field **and** every electrode's weighting field in closed form — there is no mesh,
 no solve, and no field/weighting cache (contrast the THGEM sim's neBEM + `ComponentGrid` machinery).
 
-**Near-wire field & bias margin.** `ComputePeakFieldVcm` implements the Sauli estimate
-$E_\mathrm{peak} = V / \big[\,r\,(\ln(\mathrm{pitch}/2\pi r) + \pi\,\mathrm{gap}/\mathrm{pitch})\,\big]$;
-the GUI mirrors it (`_compute_peak_field_kvcm`) to warn when the Magboltz table's `e_field_max_vcm`
+**Near-wire field & bias margin.** `ComputePeakFieldVcm` implements the Sauli estimate of the field
+at the wire surface (radius $r$):
+
+```math
+E_\mathrm{peak} = \frac{V}{r\,\big(\ln\!\big(\tfrac{\mathrm{pitch}}{2\pi r}\big) + \pi\,\tfrac{\mathrm{gap}}{\mathrm{pitch}}\big)}
+```
+
+The GUI mirrors it (`_compute_peak_field_kvcm`) to warn when the Magboltz table's `e_field_max_vcm`
 sits below the field the wires actually reach.
 
 **Weighting potentials.** Each readout name (`anode`, `cathode`, `cathode_top`) gets its own
 Shockley–Ramo weighting field from the same analytic solve (1 V on that electrode, 0 on the others).
-By the theorem the three sum to unity, so $Q_\mathrm{anode} + Q_\mathrm{cathode} + Q_\mathrm{cathode\_top} = 0$
+By the theorem the three sum to unity, so $`Q_\mathrm{anode} + Q_\mathrm{cathode} + Q_\mathrm{cathode\_top} = 0`$
 for a fully collected charge — the code checks this to machine precision.
 
 **Why the electron spike appears on the cathode.** It is tempting to expect no electron signal on the
 cathode, because the cathode weighting potential is *small* near the wire (the wires screen it). But
-the induced charge is set by the *change* $\Delta W$ along the track, not by $W$ itself. Just outside
-the wire the avalanche electrons collapse onto it, and by the up–down symmetry of the two equidistant
-cathodes each collects $\approx$ half of the anode electron signal — a genuine, sub-nanosecond spike.
-It carries only $\sim 8\%$ of the cathode *charge* but dominates the peak *current*, because it is so
-brief. The electrode stack and the wire geometry are drawn to scale in panel (A) of the TikZ
-schematic [`docs/readout_scheme.tex`](readout_scheme.tex) (compile with `pdflatex` for the figure).
+what sets the induced charge is the *change* $\Delta W$ along the track, not $W$ itself.
+
+Just outside the wire the avalanche electrons collapse onto it, and the two cathodes are equidistant,
+so by up–down symmetry each collects $\approx$ half of the anode electron signal. That is a genuine,
+sub-nanosecond spike: it carries only ≈8 % of the cathode *charge*, yet it dominates the peak
+*current* precisely because it is so brief. The electrode stack and the wire geometry are drawn to
+scale in panel (A) of the TikZ schematic [`docs/readout_scheme.tex`](readout_scheme.tex) (compile
+with `pdflatex` for the figure).
 
 ---
 
@@ -190,23 +198,38 @@ insulator, with the copper readout pad behind it. `SetupResistiveReadout` applie
 top of the conductive Ramo signal, both derived in `ComputeResistiveParams`.
 
 **1. Dielectric transparency $\alpha$.** The pad reads the analytic cathode weighting potential scaled
-by a capacitive divider, $W_\mathrm{pad} = \alpha\,W_\mathrm{cathode}$ with
-$\alpha = C_\mathrm{ins}/(C_\mathrm{ins} + C_\mathrm{gap} + C_\mathrm{gnd})$, where
-$C_\mathrm{ins} = \varepsilon_r/d_\mathrm{ins}$ (pad ↔ resistive layer), $C_\mathrm{gap} = 1/\mathrm{gap}$
-(pad ↔ gas return) and, if a ground plane is enabled, $C_\mathrm{gnd} = \varepsilon_{r2}/d_2$ (pad ↔
-backplane). For the default Kapton/FR4 stack $\alpha \approx 0.87$. The `ComponentUser` simply returns
+by a capacitive divider:
+
+```math
+W_\mathrm{pad} = \alpha\,W_\mathrm{cathode},
+\qquad
+\alpha = \frac{C_\mathrm{ins}}{C_\mathrm{ins} + C_\mathrm{gap} + C_\mathrm{gnd}}
+```
+
+The three arms are $`C_\mathrm{ins} = \varepsilon_r/d_\mathrm{ins}`$ (pad ↔ resistive layer),
+$`C_\mathrm{gap} = 1/\mathrm{gap}`$ (pad ↔ gas return) and, if a ground plane is enabled,
+$`C_\mathrm{gnd} = \varepsilon_{r2}/d_2`$ (pad ↔ backplane). For the default Kapton/FR4 stack
+$\alpha \approx 0.87$. The `ComponentUser` simply returns
 `alpha * fieldCmp.WeightingPotential(..., "cathode")`.
 
 **2. Surface-potential relaxation.** Charge that lands on the resistive layer leaks to the grounded
-edges with time constant $\tau = \varepsilon_0 \varepsilon_r \rho_s L^2 / (\pi^2 d)$, so the weighting
-potential decays as $W(t) = W\,e^{-t/\tau}$. Because that is separable, both the during-drift and the
-after-collection contributions reduce **exactly** to a one-pole high-pass on the binned pad current —
-`ApplyResistiveRelaxation` (a thin wrapper over `ApplyOnePoleHighPass`). This is mathematically
-identical to Garfield's per-step `SetDelayedWeightingPotential` machinery for this model, but costs
-$O(n_\mathrm{bins})$ instead of an evaluation per drift step, and is exact at the bin resolution. For
-the defaults $\tau \approx 157$ µs, so it removes only $\sim 10^{-5}$ of a 1 ns spike but shapes the
-long ion tail; set `time_window_ns` $\ge 5\tau$ to capture the delayed charge. `enable_delayed_signal`
-toggles it.
+edges with a time constant set by the sheet resistivity and the insulator:
+
+```math
+\tau = \frac{\varepsilon_0\,\varepsilon_r\,\rho_s\,L^2}{\pi^2 d},
+\qquad
+W(t) = W\,e^{-t/\tau}
+```
+
+Because that decay is separable, both the during-drift and the after-collection contributions reduce
+**exactly** to a one-pole high-pass on the binned pad current — `ApplyResistiveRelaxation` (a thin
+wrapper over `ApplyOnePoleHighPass`). It is mathematically identical to Garfield's per-step
+`SetDelayedWeightingPotential` machinery for this model, but costs $`O(n_\mathrm{bins})`$ instead of
+an evaluation per drift step, and is exact at the bin resolution.
+
+For the defaults $\tau \approx 157$ µs, so the filter removes only $`\sim 10^{-5}`$ of a 1 ns spike
+while still shaping the long ion tail; set `time_window_ns` $\ge 5\tau$ to capture the delayed charge.
+`enable_delayed_signal` toggles it.
 
 **Ground plane.** `ground_plane_enabled` adds the $C_\mathrm{gnd}$ arm above, lowering $\alpha$
 ($\approx 0.98 \to 0.87$ for 1 mm FR4) and defining the pad↔backplane capacitance the front-end sink
@@ -214,9 +237,9 @@ uses (§8).
 
 **Validity.** $\alpha$ is the analytic dielectric-transparency approximation: it assumes the interface
 field is uniform, so the gas weighting potential keeps its exact wire-screened shape and is merely
-rescaled by the scalar $\alpha$. The wire ripple has decayed to $\sim 0.7\%$ a full gap below the
-wires, so $\alpha\,W$ is accurate to **$\sim 1\%$** for the default geometry; the error grows with
-$d/\mathrm{gap}$ and $\varepsilon_r$. Charges never enter the insulator — the gas is bounded by the
+rescaled by the scalar $\alpha$. The wire ripple has decayed to ≈0.7 % a full gap below the
+wires, so $`\alpha\,W`$ is accurate to **≈1 %** for the default geometry; the error grows with
+$`d/\mathrm{gap}`$ and $\varepsilon_r$. Charges never enter the insulator — the gas is bounded by the
 analytic cathode plane, so every electron and ion is absorbed there.
 The TikZ schematic [`docs/readout_scheme.tex`](readout_scheme.tex) diagrams the implemented chain and
 the remaining modelling criticalities (compile with `pdflatex` for the figure).
@@ -269,26 +292,43 @@ run's raw waveforms are byte-for-byte unchanged. `ComputeAmplifierParams` derive
 `AmplifierOutputMv` applies them per channel.
 
 **Faithful transimpedance.** Within its band the amplifier follows the input current — there is no
-differentiation: $V_\mathrm{out}\,[\mathrm{mV}] = G \cdot R_\mathrm{in} \cdot \mathrm{LP}_{2\,\mathrm{GHz}}[\,i\,] \cdot 10^{-3}$,
-with $G = 10^{\,\mathrm{gain\_db}/20}$ (40 dB →
-×100) and $R_\mathrm{in} = 50\ \Omega$, so $V = 5\cdot i\,[\mathrm{fC/ns}]$. The 2 GHz upper edge is a
-one-pole low-pass, $\tau \approx 0.08$ ns (negligible at 0.5 ns bins). The measured **charge** pulse
-is reproduced by *integrating* the output — `anode_amp_int` / `cathode_amp_int`, $\int V\,\mathrm{d}t$
-[mV·ns].
+differentiation:
 
-**The cathode pad-capacitance current sink** (frequency-dependent spike roll-off). The readout pad has
-a capacitance to the grounded backplane, $C_\mathrm{pad} = \varepsilon_0 \varepsilon_r A / d$
-(`ComputePadBackplaneCapPf`, from `pad_area_cm2`, the ground-plane insulator thickness and its
-$\varepsilon_r$). At the amplifier input this capacitance **sinks** high-frequency current into the
-$R_\mathrm{in}$ load — a one-pole low-pass with $\tau_\mathrm{in} = R_\mathrm{in} C_\mathrm{pad}$
-(`tauLpCathodeInputNs`), corner $f_c = 1/(2\pi R_\mathrm{in} C_\mathrm{pad})$. Unlike the flat gain,
-this attenuates the sub-ns electron **spike** far more than the µs ion tail — the physically-correct,
-frequency-dependent behaviour, and the reason a real pad readout usually does not resolve the spike.
-It is applied to the **cathode only** (`AmplifierOutputMv(..., tauLpCathodeInputNs)`; the anode passes
-`0.`), and only when resistive readout + a pad area + a ground plane are set — otherwise
-$C_\mathrm{pad} = 0$, the filter is a no-op, and the run is unchanged. $C_\mathrm{pad}$,
-$\tau_\mathrm{in}$ and $f_c$ are printed at start-up and shown live in the GUI's **Element impedances
-$|Z(f)|$** panel (§11): $|Z_\mathrm{pad}|$ crosses $R_\mathrm{in}$ exactly at $f_c$.
+```math
+V_\mathrm{out}\,[\mathrm{mV}] = G \cdot R_\mathrm{in} \cdot \mathrm{LP}_{2\,\mathrm{GHz}}\big[\,i\,\big] \cdot 10^{-3},
+\qquad
+G = 10^{\,\mathrm{gain\_db}/20}
+```
+
+With the datasheet defaults $G = 100$ (40 dB) and $`R_\mathrm{in} = 50\ \Omega`$, this is simply
+$`V = 5\cdot i\,[\mathrm{fC/ns}]`$. The 2 GHz upper edge is a one-pole low-pass,
+$\tau \approx 0.08$ ns — negligible at 0.5 ns bins. The measured **charge** pulse is reproduced by
+*integrating* the output: `anode_amp_int` / `cathode_amp_int`, $`\int V\,\mathrm{d}t`$ [mV·ns].
+
+**The cathode pad-capacitance current sink** (frequency-dependent spike roll-off). The readout pad
+has a capacitance to the grounded backplane below it, computed geometrically by
+`ComputePadBackplaneCapPf` from `pad_area_cm2`, the ground-plane insulator thickness and its
+$\varepsilon_r$. At the amplifier input that capacitance **sinks** high-frequency current away from
+the $R_\mathrm{in}$ load, which is a one-pole low-pass (`tauLpCathodeInputNs`):
+
+```math
+C_\mathrm{pad} = \frac{\varepsilon_0\,\varepsilon_r\,A}{d},
+\qquad
+\tau_\mathrm{in} = R_\mathrm{in}\,C_\mathrm{pad},
+\qquad
+f_c = \frac{1}{2\pi R_\mathrm{in} C_\mathrm{pad}}
+```
+
+Unlike the flat gain, this attenuates the sub-ns electron **spike** far more than the µs ion tail.
+That is the physically correct behaviour, and it is why a real pad readout usually does not resolve
+the spike at all.
+
+The sink is applied to the **cathode only** — `AmplifierOutputMv(..., tauLpCathodeInputNs)`, while
+the anode passes `0.` — and only when resistive readout, a pad area and a ground plane are all set.
+Otherwise $`C_\mathrm{pad} = 0`$, the filter is a no-op, and the run is unchanged. The values of
+$C_\mathrm{pad}$, $\tau_\mathrm{in}$ and $f_c$ are printed at start-up and shown live in the GUI's
+**Element impedances $`\lvert Z(f)\rvert`$** panel (§11), where $`\lvert Z_\mathrm{pad}\rvert`$
+crosses $R_\mathrm{in}$ exactly at $f_c$.
 
 **Inert legacy keys.** `coupling_cap_nf`, `wire_series_cap_pf`, `cathode_cable_cap_pf` and
 `bandwidth_low_hz` are kept for JSON compatibility but apply no filter — no AC-coupling high-pass, no
@@ -372,8 +412,8 @@ over the wire span).
   in real time; Stop sends `SIGTERM`.
 - **`ConfigPanel(QScrollArea)`** — one `QGroupBox` per config block (Geometry, Readout, Amplifier,
   Source, Gas, Simulation, Output); Load / Save operate on the same JSON the CLI reads via `--config`.
-  The Amplifier box embeds the **Element impedances $|Z(f)|$** group, which recomputes each readout
-  element's $|Z|$ at two reference frequencies plus the pad-cap sink's $C_\mathrm{pad}$,
+  The Amplifier box embeds the **Element impedances $\lvert Z(f)\rvert$** group, which recomputes each
+  readout element's $\lvert Z\rvert$ at two reference frequencies plus the pad-cap sink's $C_\mathrm{pad}$,
   $\tau_\mathrm{in}$, $f_c$ live — mirroring the C++ `ComputePadBackplaneCapPf` / `ComputeResistiveParams`
   (§8), so a mistuned front-end is obvious before running.
 - **`ResultsPanel(QTabWidget)`** — nine result tabs (`uproot` opens the ROOT file, PyROOT draws):
@@ -386,8 +426,8 @@ over the wire span).
 | Waveforms | per-event `anode`/`cathode`, Raw [fC/ns] or Amplifier [mV], optional e⁻/ion overlay |
 | Integrals | running charge integral of the displayed mode (fC, or mV·ns in Amplifier mode) |
 | 3D Tracks | detector geometry + primary / avalanche / ion drift lines (needs `store_drift_lines`) |
-| E-Field | 2D $|E|$ / $V$ / $E_z$ / $E_x$ maps in XY / XZ / YZ planes |
-| Weighting Field | per-electrode $W$ / $|E_w|$ for `anode`/`cathode`/`cathode_top`; $\alpha$-scaled cathode in resistive mode |
+| E-Field | 2D $\lvert E\rvert$ / $V$ / $E_z$ / $E_x$ maps in XY / XZ / YZ planes |
+| Weighting Field | per-electrode $W$ / $\lvert E_w\rvert$ for `anode`/`cathode`/`cathode_top`; $\alpha$-scaled cathode in resistive mode |
 | Magboltz | gas transport properties from the `_props.csv` sidecar |
 
 A shared **Amplifier / Raw** selector keeps Waveforms + Integrals in sync. The Weighting-Field and
@@ -400,10 +440,10 @@ E-Field tabs are interactive straight from the geometry spinboxes — no run nee
 The non-obvious facts, in one place (each is expanded above):
 
 - **Resistive relaxation is an *exact* one-pole post-filter** (`ApplyResistiveRelaxation`), not an
-  approximation: separability of $W\,e^{-t/\tau}$ makes it identical to per-step
-  `SetDelayedWeightingPotential` at $O(n_\mathrm{bins})$ cost. §6.
-- **$\alpha$ is a $\sim 1\%$ dielectric-transparency approximation** for the default geometry; the
-  error grows with $d/\mathrm{gap}$ and $\varepsilon_r$. §6.
+  approximation: separability of $`W\,e^{-t/\tau}`$ makes it identical to per-step
+  `SetDelayedWeightingPotential` at $`O(n_\mathrm{bins})`$ cost. §6.
+- **$\alpha$ is a ≈1 % dielectric-transparency approximation** for the default geometry; the
+  error grows with $`d/\mathrm{gap}`$ and $\varepsilon_r$. §6.
 - **The pad-cap sink is opt-in**: it needs resistive readout **+** `pad_area_cm2 > 0` **+** a ground
   plane **+** the amplifier; otherwise $C_\mathrm{pad} = 0$ and the run is byte-for-byte unchanged. §8.
 - **Ion drift needs `GARFIELD_INSTALL`** so the CO₂⁺ mobility table (`IonMobility_CO2+_CO2.txt`) loads;
