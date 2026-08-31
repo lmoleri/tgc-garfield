@@ -18,10 +18,10 @@ projects/*/*.gas
 projects/*/*.root
 *.root
 
-# parallel_plate, THGEM and MSP have their own git repos; exclude from this workspace repo
+# parallel_plate, THGEM and double_THGEM have their own git repos; exclude from this workspace repo
 projects/parallel_plate/
 projects/THGEM/
-projects/MSP/
+projects/double_THGEM/
 
 # LaTeX build artifacts (the .tex is the source of truth)
 projects/*/docs/*.pdf
