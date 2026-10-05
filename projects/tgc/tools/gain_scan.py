@@ -28,9 +28,11 @@ Subcommands
 import argparse
 import concurrent.futures as cf
 import json
+import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -75,17 +77,69 @@ def _check_gas(cfg: dict, config_name: str) -> bool:
     return False
 
 
-def _merge_dir(out_dir: Path) -> Path:
-    """Concatenate every summary.csv under out_dir into out_dir/gain_map.csv."""
-    frames = [pd.read_csv(c) for c in sorted(out_dir.glob("**/summary.csv"))]
-    if not frames:
-        raise SystemExit(f"no summary.csv found under {out_dir}")
-    merged = (pd.concat(frames, ignore_index=True)
-              .drop_duplicates(subset=["source_distance_mm", "x_position_cm"])
-              .sort_values(["source_distance_mm", "x_position_cm"])
-              .reset_index(drop=True))
-    path = out_dir / "gain_map.csv"
-    merged.to_csv(path, index=False)
+def _parse_tag(tag: str):
+    """Invert FileSafeNumber: 'dist_0p1mm_x0p3mm' -> (dist_mm=0.1, x_cm=0.03).
+
+    'p'->'.', 'm'->'-'; the tag's x is in mm (tgc_sim stores x*10), so /10 for cm.
+    Returns (None, None) for un-parseable tags (e.g. random 'dist_rnd').
+    """
+    m = re.match(r"dist_(.+?)mm(?:_x(.+?)mm)?$", tag)
+    if not m:
+        return None, None
+
+    def num(s):
+        if s is None:
+            return None
+        try:
+            return float(s.replace("p", ".").replace("m", "-"))
+        except ValueError:
+            return None
+
+    dist = num(m.group(1))
+    x_mm = num(m.group(2))
+    return dist, (x_mm / 10.0 if x_mm is not None else None)
+
+
+def _pool_events(out_dir: Path) -> Path:
+    """Pool the per-event `avalanche_size` of EVERY tgc_sim.root under out_dir,
+    grouped by point tag, into out_dir/gain_map.csv — the incremental, no-waste
+    aggregation. Running more batches under out_dir and re-pooling only adds events.
+    """
+    import uproot
+    from collections import defaultdict
+    pools = defaultdict(list)
+    for root in sorted(Path(out_dir).glob("**/tgc_sim.root")):
+        try:
+            with uproot.open(root) as f:
+                for name in f.keys(cycle=False):
+                    if name.rsplit("/", 1)[-1] != "t_signals":
+                        continue
+                    arr = f[name]["avalanche_size"].array(library="np")
+                    if len(arr):
+                        pools[name.rsplit("/", 1)[0]].append(arr)
+        except Exception as e:  # noqa: BLE001 — skip a corrupt/partial file, keep going
+            print(f"warning: skipping {root}: {e}", file=sys.stderr)
+    if not pools:
+        raise SystemExit(f"no t_signals/avalanche_size found under {out_dir}")
+
+    rows = []
+    for tag, arrs in pools.items():
+        dist, x = _parse_tag(tag)
+        if dist is None or x is None:
+            continue
+        g = np.concatenate(arrs)
+        n = int(len(g))
+        rms = float(g.std())
+        rows.append({
+            "source_distance_mm": dist, "x_position_cm": x, "n_events": n,
+            "mean_avalanche_size": float(g.mean()),
+            "rms_avalanche_size": rms,
+            "sem_avalanche_size": rms / np.sqrt(n) if n else float("nan"),
+        })
+    df = (pd.DataFrame(rows)
+          .sort_values(["source_distance_mm", "x_position_cm"]).reset_index(drop=True))
+    path = Path(out_dir) / "gain_map.csv"
+    df.to_csv(path, index=False)
     return path
 
 
@@ -106,14 +160,16 @@ def run(args) -> int:
     ys = cfg["source"]["source_distances_mm"]
     nx, nev = len(cfg["source"]["x_positions_cm"]), cfg["simulation"]["n_events"]
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    label = args.label or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
+    batch_dir = out_dir / label
+    batch_dir.mkdir(parents=True, exist_ok=True)
     jobs = args.jobs or len(ys)
-    print(f"Launching {len(ys)} depth jobs ({nx} x-points x {nev} events each) "
-          f"on up to {jobs} workers ...")
+    print(f"Batch '{label}': {len(ys)} depth jobs ({nx} x-points x {nev} events each) "
+          f"on up to {jobs} workers -> {batch_dir}")
 
     def _one(y: float):
         cmd = [str(BINARY), "--config", args.config, "--distance", f"{y:g}",
-               "--out", str(out_dir), "--run-name", _ytag(y)]
+               "--out", str(batch_dir), "--run-name", _ytag(y)]
         t0 = time.time()
         p = subprocess.run(cmd, cwd=TGC_DIR, capture_output=True, text=True)
         return y, p.returncode, time.time() - t0, p.stderr[-400:]
@@ -128,8 +184,9 @@ def run(args) -> int:
     if any(rc != 0 for rc in rcs):
         print("error: one or more jobs failed.", file=sys.stderr)
         return 1
-    path = _merge_dir(out_dir)
-    print(f"\nDone in {time.time() - t_start:.1f} s -> {path}")
+    path = _pool_events(out_dir)
+    print(f"\nDone in {time.time() - t_start:.1f} s -> {path}  "
+          f"(pooled over every batch under {out_dir})")
     print(f"Plot with:  python3 tools/gain_scan.py plot --csv {path}")
     return 0
 
@@ -142,7 +199,10 @@ def emit(args) -> int:
     if not _check_gas(cfg, args.config):
         return 1
     out_dir = Path(args.out)
-    jobs_dir = out_dir / "jobs"
+    # Each batch is self-contained under out_dir/<label>/; accumulate pools over out_dir.
+    label = args.label or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
+    batch_dir = out_dir / label
+    jobs_dir = batch_dir / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
 
     ys = cfg["source"]["source_distances_mm"]
@@ -163,18 +223,20 @@ def emit(args) -> int:
             # the repo root (for the gas cache) and passes these to tgc_sim.
             manifest.append(f"{cfg_path.resolve()} {tag}")
 
-    (out_dir / "manifest.txt").write_text("\n".join(manifest) + "\n")
+    (batch_dir / "manifest.txt").write_text("\n".join(manifest) + "\n")
     print(f"Emitted {len(manifest)} jobs -> {jobs_dir}\n"
-          f"Manifest: {out_dir / 'manifest.txt'}  (array size = {len(manifest)})\n"
-          f"Submit with tools/cluster/submit_gain_scan.sbatch, then "
-          f"`gain_scan.py merge --out {out_dir}`.")
+          f"Manifest: {batch_dir / 'manifest.txt'}  (array size = {len(manifest)})\n"
+          f"Run tgc_sim with --out {batch_dir} (sbatch/xargs), then\n"
+          f"`gain_scan.py accumulate --out {out_dir}` to pool all batches.")
     return 0
 
 
-def merge(args) -> int:
-    path = _merge_dir(Path(args.out))
+def accumulate(args) -> int:
+    """Pool every batch under --out into a combined gain_map.csv (incremental, no waste)."""
+    path = _pool_events(Path(args.out))
     df = pd.read_csv(path)
-    print(f"merged {len(df)} (x,y) points -> {path}")
+    print(f"pooled {len(df)} (x,y) points, {int(df['n_events'].sum())} events total "
+          f"({int(df['n_events'].min())}-{int(df['n_events'].max())} per point) -> {path}")
     return 0
 
 
@@ -250,11 +312,19 @@ def plot(args) -> int:
 
     if args.rms:
         cap = cfg["simulation"]["max_avalanche_size"]
-        print(f"\nPer-point gain spread (per-event, from t_signals); cap={cap}:")
-        for d in sorted(Path(args.csv).parent.glob("**/tgc_sim.root")):
-            for pt, mean, rms in _point_rms(d):
-                flag = "  <-- near cap!" if mean > 0.8 * cap else ""
-                print(f"  {d.parent.name}/{pt:>18}  mean={mean:10.1f}  rms={rms:10.1f}{flag}")
+        if "rms_avalanche_size" in df.columns:  # pooled CSV — use it directly
+            print(f"\nPer-point gain (pooled over all batches); cap={cap}:")
+            for _, r in df.iterrows():
+                flag = "  <-- near cap!" if r.mean_avalanche_size > 0.8 * cap else ""
+                print(f"  dist={r.source_distance_mm:>5g} mm  x={r.x_position_cm*10:>4.1f} mm  "
+                      f"N={int(r.n_events):>4}  mean={r.mean_avalanche_size:10.1f}  "
+                      f"rms={r.rms_avalanche_size:10.1f}  sem={r.sem_avalanche_size:8.1f}{flag}")
+        else:  # legacy CSV without rms columns — re-read the trees
+            print(f"\nPer-point gain spread (per-event, from t_signals); cap={cap}:")
+            for d in sorted(Path(args.csv).parent.glob("**/tgc_sim.root")):
+                for pt, mean, rms in _point_rms(d):
+                    flag = "  <-- near cap!" if mean > 0.8 * cap else ""
+                    print(f"  {d.parent.name}/{pt:>18}  mean={mean:10.1f}  rms={rms:10.1f}{flag}")
     return 0
 
 
@@ -263,28 +333,34 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="launch the parallel scan locally and merge")
+    pr = sub.add_parser("run", help="launch the parallel scan locally; adds a batch and pools")
     pr.add_argument("--config", default="config/scan_gain.json")
     pr.add_argument("--out", default=str(DEFAULT_OUT))
+    pr.add_argument("--label", default=None,
+                    help="batch subdir name (default: batch_<timestamp>); re-runs never overwrite")
     pr.add_argument("--jobs", type=int, default=None, help="max concurrent processes")
     pr.set_defaults(func=run)
 
     pe = sub.add_parser("emit", help="write per-job configs + manifest for a scheduler")
     pe.add_argument("--config", default="config/scan_gain.json")
-    pe.add_argument("--out", required=True, help="job/output directory")
+    pe.add_argument("--out", required=True, help="scan root directory")
+    pe.add_argument("--label", default=None,
+                    help="batch subdir name (default: batch_<timestamp>)")
     pe.add_argument("--xchunks", type=int, default=1,
                     help="split the x-list into K chunks per depth (more array tasks)")
     pe.set_defaults(func=emit)
 
-    pm = sub.add_parser("merge", help="merge all */summary.csv under --out")
-    pm.add_argument("--out", required=True)
-    pm.set_defaults(func=merge)
+    for name in ("accumulate", "merge"):  # merge kept as an alias
+        pa = sub.add_parser(name, help="pool per-event gains of all batches under --out "
+                                       "into gain_map.csv (incremental, no waste)")
+        pa.add_argument("--out", required=True)
+        pa.set_defaults(func=accumulate)
 
-    pp = sub.add_parser("plot", help="render the 2D gain map from the merged CSV")
+    pp = sub.add_parser("plot", help="render the 2D gain map from the pooled CSV")
     pp.add_argument("--csv", default=str(DEFAULT_OUT / "gain_map.csv"))
     pp.add_argument("--config", default="config/scan_gain.json")
     pp.add_argument("--rms", action="store_true",
-                    help="also report per-point gain RMS from h_avalanche_size")
+                    help="also report per-point gain mean/rms/sem")
     pp.set_defaults(func=plot)
 
     args = ap.parse_args()
