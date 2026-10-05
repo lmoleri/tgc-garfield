@@ -1097,9 +1097,11 @@ DistanceSummary RunDistancePoint(const Config& cfg,
   const AmplifierParams ampPar = ComputeAmplifierParams(cfg.amplifier, cfg.readout);
   int   evtId = 0;
   float evtQa = 0.f, evtQc = 0.f;
+  float evtAval = 0.f;   // per-event avalanche size (gain), = ne * nPrimary
   signalTree.Branch("event",             &evtId, "event/I");
   signalTree.Branch("anode_charge_fC",   &evtQa, "anode_charge_fC/F");
   signalTree.Branch("cathode_charge_fC", &evtQc, "cathode_charge_fC/F");
+  signalTree.Branch("avalanche_size",    &evtAval, "avalanche_size/F");
   signalTree.Branch("anode",   &anodeSig);
   signalTree.Branch("cathode", &cathodeSig);
   signalTree.Branch("anode_e",   &anodeSigE);
@@ -1204,6 +1206,7 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
     hAvalSize.Fill(static_cast<double>(totalAvalElectrons));
     avalancheSizes.push_back(static_cast<double>(totalAvalElectrons));
+    evtAval = static_cast<float>(totalAvalElectrons);  // per-event gain for t_signals
 
     // ── 3D track data ────────────────────────────────────────────────────────
     // nEp is hoisted here so both the cloud loop and the ion-drift loop reuse it.

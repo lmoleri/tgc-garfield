@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""
+Drive and plot a 2D avalanche-gain scan over the primary-electron position
+(x transverse across the wire pitch, y depth in the gap), using tgc_sim's
+MICROSCOPIC avalanche (the physically correct gain for this thin-wire geometry;
+the DriftLineRKF Townsend-integral shortcut was found to diverge here).
+
+Facts it relies on (see src/tgc_sim.cc):
+  * one run does a full CROSS PRODUCT of source_distances_mm x x_positions_cm
+    (one summary.csv row per (x, y) cell);
+  * config/scan_gain.json turns ion drift OFF and sets energy_keV=0.026 so
+    nPrimary=1 and `mean_avalanche_size` IS the single-electron gain;
+  * the binary is single-threaded, so we parallelise by launching one process
+    per depth (--distance <y>) and merging the self-describing summary.csv rows.
+
+Cost: the microscopic avalanche is ~10 s/event here (gain ~4e4), so a fine map is
+many CPU-hours -> parallelise across cores (`run`) or export to a cluster
+(`emit` + tools/cluster/submit_gain_scan.sbatch).
+
+Subcommands
+-----------
+    run   --config C [--out DIR] [--jobs N]   launch locally in parallel, then merge
+    emit  --config C --out DIR [--xchunks K]  write per-job configs + manifest (for a scheduler)
+    merge --out DIR                           merge all */summary.csv under DIR into gain_map.csv
+    plot  [--csv F] [--config C] [--rms]      2D heatmap + 1D slices from the merged CSV
+"""
+
+import argparse
+import concurrent.futures as cf
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+TGC_DIR = (SCRIPT_DIR / "..").resolve()
+BINARY = TGC_DIR / "build" / "tgc_sim"
+DEFAULT_OUT = TGC_DIR / "results" / "gain_scan"
+
+
+def _ytag(y: float) -> str:
+    return "y_" + f"{y:g}".replace(".", "p").replace("-", "m")
+
+
+def _derive_gas_filename(gas: dict) -> str:
+    """Mirror DeriveGasFileName in src/tgc_sim.cc (for the cache-hit pre-check)."""
+    f1 = round(gas["gas1_fraction_pct"])
+    return (f"{gas['gas1']}{f1}_{gas['gas2']}_{100 - f1}"
+            f"_T{round(gas['temperature_K'])}_P{round(gas['pressure_Torr'])}"
+            f"_Ee{round(gas['max_electron_energy_eV'])}"
+            f"_Ef{round(gas['e_field_min_vcm'])}v-{round(gas['e_field_max_vcm'] / 1000)}k"
+            f"_n{gas['n_field_points']}_c{gas['n_magboltz_collisions']}"
+            f"_{'pen' if gas.get('enable_penning', True) else 'nopen'}.gas")
+
+
+def _wire_positions_cm(geom: dict) -> np.ndarray:
+    n, pitch = geom["n_wires"], geom["wire_pitch_cm"]
+    return (np.arange(n) - (n - 1) / 2.0) * pitch
+
+
+def _check_gas(cfg: dict, config_name: str) -> bool:
+    gas_file = TGC_DIR / _derive_gas_filename(cfg["gas"])
+    if gas_file.exists():
+        return True
+    y0 = cfg["source"]["source_distances_mm"][0]
+    print(f"error: gas table {gas_file.name} not found at the project root.\n"
+          f"       Generate it once first:\n"
+          f"       cd {TGC_DIR} && ./build/tgc_sim --config {config_name} "
+          f"--distance {y0} --run-name warmup --out results/gain_scan",
+          file=sys.stderr)
+    return False
+
+
+def _merge_dir(out_dir: Path) -> Path:
+    """Concatenate every summary.csv under out_dir into out_dir/gain_map.csv."""
+    frames = [pd.read_csv(c) for c in sorted(out_dir.glob("**/summary.csv"))]
+    if not frames:
+        raise SystemExit(f"no summary.csv found under {out_dir}")
+    merged = (pd.concat(frames, ignore_index=True)
+              .drop_duplicates(subset=["source_distance_mm", "x_position_cm"])
+              .sort_values(["source_distance_mm", "x_position_cm"])
+              .reset_index(drop=True))
+    path = out_dir / "gain_map.csv"
+    merged.to_csv(path, index=False)
+    return path
+
+
+# ─────────────────────────────── run (local) ────────────────────────────────
+
+def run(args) -> int:
+    if not BINARY.exists():
+        print(f"error: {BINARY} not built.", file=sys.stderr)
+        return 1
+    cfg = json.loads(Path(TGC_DIR / args.config if not Path(args.config).is_absolute()
+                          else args.config).read_text())
+    if cfg["simulation"].get("enable_ion_drift", False):
+        print("warning: enable_ion_drift is true — slow, and the observable becomes "
+              "induced charge, not bare gain.", file=sys.stderr)
+    if not _check_gas(cfg, args.config):
+        return 1
+
+    ys = cfg["source"]["source_distances_mm"]
+    nx, nev = len(cfg["source"]["x_positions_cm"]), cfg["simulation"]["n_events"]
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jobs = args.jobs or len(ys)
+    print(f"Launching {len(ys)} depth jobs ({nx} x-points x {nev} events each) "
+          f"on up to {jobs} workers ...")
+
+    def _one(y: float):
+        cmd = [str(BINARY), "--config", args.config, "--distance", f"{y:g}",
+               "--out", str(out_dir), "--run-name", _ytag(y)]
+        t0 = time.time()
+        p = subprocess.run(cmd, cwd=TGC_DIR, capture_output=True, text=True)
+        return y, p.returncode, time.time() - t0, p.stderr[-400:]
+
+    t_start = time.time()
+    rcs = []
+    with cf.ThreadPoolExecutor(max_workers=jobs) as ex:
+        for y, rc, dt, err in ex.map(_one, ys):
+            print(f"  [{'ok ' if rc == 0 else 'FAIL'}] y={y:>5} mm  ({dt:5.1f} s)"
+                  + ("" if rc == 0 else f"  {err}"))
+            rcs.append(rc)
+    if any(rc != 0 for rc in rcs):
+        print("error: one or more jobs failed.", file=sys.stderr)
+        return 1
+    path = _merge_dir(out_dir)
+    print(f"\nDone in {time.time() - t_start:.1f} s -> {path}")
+    print(f"Plot with:  python3 tools/gain_scan.py plot --csv {path}")
+    return 0
+
+
+# ─────────────────────────── emit (for a scheduler) ─────────────────────────
+
+def emit(args) -> int:
+    cfg = json.loads(Path(TGC_DIR / args.config if not Path(args.config).is_absolute()
+                          else args.config).read_text())
+    if not _check_gas(cfg, args.config):
+        return 1
+    out_dir = Path(args.out)
+    jobs_dir = out_dir / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    ys = cfg["source"]["source_distances_mm"]
+    xs = cfg["source"]["x_positions_cm"]
+    xchunks = max(1, args.xchunks)
+    x_splits = [list(c) for c in np.array_split(xs, min(xchunks, len(xs)))]
+
+    manifest = []
+    for y in ys:
+        for ci, xsub in enumerate(x_splits):
+            sub = json.loads(json.dumps(cfg))           # deep copy
+            sub["source"]["source_distances_mm"] = [y]
+            sub["source"]["x_positions_cm"] = xsub
+            tag = _ytag(y) + (f"_xc{ci}" if xchunks > 1 else "")
+            cfg_path = jobs_dir / f"{tag}.json"
+            cfg_path.write_text(json.dumps(sub, indent=2))
+            # manifest line: <absolute config path> <run-name>; the sbatch cd's to
+            # the repo root (for the gas cache) and passes these to tgc_sim.
+            manifest.append(f"{cfg_path.resolve()} {tag}")
+
+    (out_dir / "manifest.txt").write_text("\n".join(manifest) + "\n")
+    print(f"Emitted {len(manifest)} jobs -> {jobs_dir}\n"
+          f"Manifest: {out_dir / 'manifest.txt'}  (array size = {len(manifest)})\n"
+          f"Submit with tools/cluster/submit_gain_scan.sbatch, then "
+          f"`gain_scan.py merge --out {out_dir}`.")
+    return 0
+
+
+def merge(args) -> int:
+    path = _merge_dir(Path(args.out))
+    df = pd.read_csv(path)
+    print(f"merged {len(df)} (x,y) points -> {path}")
+    return 0
+
+
+# ─────────────────────────────────── plot ───────────────────────────────────
+
+def _point_rms(root_path: Path):
+    """Yield (point_name, mean, rms) of per-event gain from each point's t_signals tree.
+
+    Reads the `avalanche_size` branch (not the h_avalanche_size histogram, whose
+    ROOT auto-bin buffer is not flushed below ~1000 entries and reads as empty).
+    """
+    import uproot
+    with uproot.open(root_path) as f:
+        for name in f.keys(cycle=False):
+            if name.rsplit("/", 1)[-1] != "t_signals":
+                continue
+            arr = f[name]["avalanche_size"].array(library="np")
+            if len(arr) == 0:
+                continue
+            yield name.rsplit("/", 1)[0], float(arr.mean()), float(arr.std())
+
+
+def plot(args) -> int:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    csv = Path(args.csv)
+    if not csv.exists():
+        print(f"error: {csv} not found. Run the scan first.", file=sys.stderr)
+        return 1
+    df = pd.read_csv(csv)
+    cfg = json.loads((TGC_DIR / args.config).read_text())
+    wires = _wire_positions_cm(cfg["geometry"])
+
+    piv = df.pivot_table(index="source_distance_mm", columns="x_position_cm",
+                         values="mean_avalanche_size")
+    xs, ys, Z = piv.columns.to_numpy(), piv.index.to_numpy(), piv.to_numpy()
+
+    fig, (axm, axx, axy) = plt.subplots(1, 3, figsize=(16, 5))
+    im = axm.pcolormesh(xs * 10.0, ys, Z, shading="nearest", cmap="viridis")
+    for xw in wires:
+        if xs.min() - 1e-9 <= xw <= xs.max() + 1e-9:
+            axm.axvline(xw * 10.0, color="white", lw=0.8, ls="--", alpha=0.7)
+    axm.set_xlabel("x  [mm]   (dashed = wire)")
+    axm.set_ylabel("source depth from wire plane  [mm]")
+    axm.set_title("Single-electron gain  vs (x, depth)")
+    fig.colorbar(im, ax=axm, label="mean avalanche size  (gain)")
+
+    def dist_from_wire_mm(xc):
+        return np.min(np.abs(np.asarray(xc)[:, None] - wires[None, :]), axis=1) * 10.0
+    dfw = dist_from_wire_mm(xs)
+    order = np.argsort(dfw)
+    for yv in ys[:: max(1, len(ys) // 4)]:
+        axx.plot(dfw[order], piv.loc[yv].to_numpy()[order], "o-", ms=3, label=f"y={yv:g} mm")
+    axx.set_xlabel("distance from nearest wire  [mm]")
+    axx.set_ylabel("mean avalanche size  (gain)")
+    axx.set_title("Gain vs transverse position")
+    axx.legend(fontsize=8)
+
+    for xv in xs[:: max(1, len(xs) // 4)]:
+        axy.plot(ys, piv[xv].to_numpy(), "o-", ms=3,
+                 label=f"x={xv*10:g} mm (d_w={dist_from_wire_mm([xv])[0]:.2g})")
+    axy.set_xlabel("source depth from wire plane  [mm]")
+    axy.set_ylabel("mean avalanche size  (gain)")
+    axy.set_title("Gain vs depth")
+    axy.legend(fontsize=8)
+
+    fig.tight_layout()
+    out_png = csv.with_name("gain_map.png")
+    fig.savefig(out_png, dpi=130)
+    print(f"wrote {out_png}")
+
+    if args.rms:
+        cap = cfg["simulation"]["max_avalanche_size"]
+        print(f"\nPer-point gain spread (per-event, from t_signals); cap={cap}:")
+        for d in sorted(Path(args.csv).parent.glob("**/tgc_sim.root")):
+            for pt, mean, rms in _point_rms(d):
+                flag = "  <-- near cap!" if mean > 0.8 * cap else ""
+                print(f"  {d.parent.name}/{pt:>18}  mean={mean:10.1f}  rms={rms:10.1f}{flag}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    pr = sub.add_parser("run", help="launch the parallel scan locally and merge")
+    pr.add_argument("--config", default="config/scan_gain.json")
+    pr.add_argument("--out", default=str(DEFAULT_OUT))
+    pr.add_argument("--jobs", type=int, default=None, help="max concurrent processes")
+    pr.set_defaults(func=run)
+
+    pe = sub.add_parser("emit", help="write per-job configs + manifest for a scheduler")
+    pe.add_argument("--config", default="config/scan_gain.json")
+    pe.add_argument("--out", required=True, help="job/output directory")
+    pe.add_argument("--xchunks", type=int, default=1,
+                    help="split the x-list into K chunks per depth (more array tasks)")
+    pe.set_defaults(func=emit)
+
+    pm = sub.add_parser("merge", help="merge all */summary.csv under --out")
+    pm.add_argument("--out", required=True)
+    pm.set_defaults(func=merge)
+
+    pp = sub.add_parser("plot", help="render the 2D gain map from the merged CSV")
+    pp.add_argument("--csv", default=str(DEFAULT_OUT / "gain_map.csv"))
+    pp.add_argument("--config", default="config/scan_gain.json")
+    pp.add_argument("--rms", action="store_true",
+                    help="also report per-point gain RMS from h_avalanche_size")
+    pp.set_defaults(func=plot)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
