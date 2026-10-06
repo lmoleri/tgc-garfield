@@ -374,8 +374,8 @@ def waveform(args) -> int:
     alen = n_pre + n_post
     search = int(round(50.0 / dt))                          # spike is within ~50 ns (max drift)
 
-    asum, acnt = {}, {}          # per-bin aligned sum / count (edge-safe)
-    dsum, dsq, nev = {}, {}, {}  # drift-time (spike-time) accumulators
+    asum, awt = {}, {}                 # per-bin weighted sum / weight-sum (edge-safe)
+    dsum, dsq, dwt, nev = {}, {}, {}, {}  # weighted drift-time accumulators + raw event count
     for root in sorted(out_dir.glob("**/tgc_sim.root")):
         try:
             with uproot.open(root) as f:
@@ -388,23 +388,29 @@ def waveform(args) -> int:
                     M = np.asarray(f[name]["anode"].array().tolist(), dtype=float)
                     if M.ndim != 2 or M.shape[0] == 0:
                         continue
+                    gain = f[name]["avalanche_size"].array(library="np").astype(float)
                     nb = M.shape[1]
                     pk = np.argmax(np.abs(M[:, :min(search, nb)]), axis=1)  # spike bin / event
                     peak = M[np.arange(M.shape[0]), pk]
                     good = np.abs(peak) > 1e-12
                     if not good.any():
                         continue
+                    # weight each event by its gain (down-weights the noisy low-gain,
+                    # few-ion pulses; ~ inverse-variance) or equally for --weight equal.
+                    wt = gain if args.weight == "gain" else np.ones_like(gain)
                     a = asum.setdefault(tag, np.zeros(alen))
-                    c = acnt.setdefault(tag, np.zeros(alen))
+                    w = awt.setdefault(tag, np.zeros(alen))
                     for e in np.nonzero(good)[0]:               # align each event to its spike
                         p = int(pk[e]); lo, hi = p - n_pre, p + n_post
                         sa, sb = max(0, lo), min(nb, hi)        # clip to the stored window
                         da = sa - lo
-                        a[da:da + (sb - sa)] += M[e, sa:sb] / peak[e]
-                        c[da:da + (sb - sa)] += 1.0
+                        a[da:da + (sb - sa)] += wt[e] * M[e, sa:sb] / peak[e]
+                        w[da:da + (sb - sa)] += wt[e]
                     tpk = (pk[good] + 0.5) * dt                 # spike time = drift time to wire
-                    dsum[tag] = dsum.get(tag, 0.0) + float(tpk.sum())
-                    dsq[tag] = dsq.get(tag, 0.0) + float((tpk ** 2).sum())
+                    wg = wt[good]
+                    dsum[tag] = dsum.get(tag, 0.0) + float((wg * tpk).sum())
+                    dsq[tag] = dsq.get(tag, 0.0) + float((wg * tpk ** 2).sum())
+                    dwt[tag] = dwt.get(tag, 0.0) + float(wg.sum())
                     nev[tag] = nev.get(tag, 0) + int(good.sum())
         except Exception as e:  # noqa: BLE001
             print(f"warning: skipping {root}: {e}", file=sys.stderr)
@@ -412,10 +418,10 @@ def waveform(args) -> int:
         raise SystemExit(f"no t_signals/anode waveforms found under {out_dir}")
 
     t = (np.arange(alen) - n_pre) * dt                       # time since spike [ns] (peak at 0)
-    means = {tag: np.divide(asum[tag], acnt[tag],
-                            out=np.full(alen, np.nan), where=acnt[tag] > 0) for tag in asum}
-    drift = {tag: (dsum[tag] / nev[tag],
-                   float(np.sqrt(max(0.0, dsq[tag] / nev[tag] - (dsum[tag] / nev[tag]) ** 2))))
+    means = {tag: np.divide(asum[tag], awt[tag],
+                            out=np.full(alen, np.nan), where=awt[tag] > 0) for tag in asum}
+    drift = {tag: (dsum[tag] / dwt[tag],
+                   float(np.sqrt(max(0.0, dsq[tag] / dwt[tag] - (dsum[tag] / dwt[tag]) ** 2))))
              for tag in nev}
 
     rows = []
@@ -452,7 +458,7 @@ def waveform(args) -> int:
 
     by_xy = {(round(_parse_tag(tag)[1], 4), round(_parse_tag(tag)[0], 4)): (means[tag], nev[tag])
              for tag in means}
-    fig, (axo, axt, axd) = plt.subplots(1, 3, figsize=(18, 5))
+    fig, ((axo, axz), (axt, axd)) = plt.subplots(2, 2, figsize=(13, 9))
     ys_all = sorted({round(_parse_tag(tag)[0], 4) for tag in means})
     xs_all = sorted({round(_parse_tag(tag)[1], 4) for tag in means})
     x_on, x_mid = min(xs_all, key=_dwire_mm), max(xs_all, key=_dwire_mm)
@@ -461,14 +467,19 @@ def waveform(args) -> int:
         hit = by_xy.get((round(xv, 4), round(yv, 4)))
         if hit:
             mean, n = hit
-            axo.plot(t, mean, lw=1.3,
-                     label=f"x={xv*10:g}mm (d_wire={_dwire_mm(xv):.2g}mm), y={yv:g}mm, N={n}")
-    axo.axhline(0, color="k", lw=0.5)
-    axo.axvline(0, color="0.6", lw=0.5, ls=":")
-    axo.set_xlabel("time since spike [ns]")
-    axo.set_ylabel("mean peak-normalized anode current")
-    axo.set_title(f"Peak-aligned anode pulse shape  (T_cut={args.tcut:g} ns)")
-    axo.legend(fontsize=8)
+            lbl = f"x={xv*10:g}mm (d_wire={_dwire_mm(xv):.2g}mm), y={yv:g}mm, N={n}"
+            axo.plot(t, mean, lw=1.3, label=lbl)
+            axz.plot(t, mean, lw=1.3, marker=".", ms=3, label=lbl)  # zoom: per-bin markers
+    for ax in (axo, axz):
+        ax.axhline(0, color="k", lw=0.5)
+        ax.axvline(0, color="0.6", lw=0.5, ls=":")
+        ax.set_xlabel("time since spike [ns]")
+        ax.set_ylabel("mean peak-normalized anode current")
+        ax.legend(fontsize=8)
+    axo.set_title(f"Peak-aligned anode pulse shape  "
+                  f"(T_cut={args.tcut:g} ns, {args.weight}-weighted)")
+    axz.set_title("Zoom: first 10 ns  (spike + early ion tail)")
+    axz.set_xlim(-2, 10)
 
     tailmask = t > 5.0
     _map(axt, lambda tg: float(np.nanmean(means[tg][tailmask])),
@@ -527,6 +538,9 @@ def main() -> int:
                     help="config used for the run (for time_step_ns + geometry)")
     pw.add_argument("--tcut", type=float, default=100.0,
                     help="analysis cutoff time [ns] (default 100; <= captured time_window_ns)")
+    pw.add_argument("--weight", choices=("gain", "equal"), default="gain",
+                    help="per-event weight in the average: gain (default; down-weights "
+                         "noisy low-gain pulses) or equal")
     pw.set_defaults(func=waveform)
 
     args = ap.parse_args()
