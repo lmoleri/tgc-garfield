@@ -19,15 +19,19 @@ many CPU-hours -> parallelise across cores (`run`) or export to a cluster
 
 Subcommands
 -----------
-    run   --config C [--out DIR] [--jobs N]   launch locally in parallel, then merge
-    emit  --config C --out DIR [--xchunks K]  write per-job configs + manifest (for a scheduler)
-    merge --out DIR                           merge all */summary.csv under DIR into gain_map.csv
-    plot  [--csv F] [--config C] [--rms]      2D heatmap + 1D slices from the merged CSV
+    run        --config C [--out DIR] [--jobs N]  launch locally in parallel, then pool
+    emit       --config C --out DIR [--xchunks K] write per-job configs + manifest (scheduler)
+    accumulate --out DIR                          pool per-event gains of all batches -> gain_map.csv
+    plot       [--csv F] [--config C] [--rms]     2D gain heatmap + 1D slices from the pooled CSV
+    waveform   --out DIR [--tcut 100]             mean peak-normalized anode current shape vs
+                                                  position (needs an ion-drift run, e.g.
+                                                  config/scan_waveform.json); T_cut selectable here
 """
 
 import argparse
 import concurrent.futures as cf
 import json
+import os
 import re
 import subprocess
 import sys
@@ -62,6 +66,18 @@ def _derive_gas_filename(gas: dict) -> str:
 def _wire_positions_cm(geom: dict) -> np.ndarray:
     n, pitch = geom["n_wires"], geom["wire_pitch_cm"]
     return (np.arange(n) - (n - 1) / 2.0) * pitch
+
+
+def _warn_ion_drift(cfg: dict) -> None:
+    """Ion drift is slow and needs the CO2+ mobility table via GARFIELD_INSTALL."""
+    if not cfg["simulation"].get("enable_ion_drift", False):
+        return
+    print("note: enable_ion_drift is true — the waveform includes the ion tail (needed "
+          "for the waveform test) but each event is slower.", file=sys.stderr)
+    if not os.environ.get("GARFIELD_INSTALL"):
+        print("ERROR-RISK: GARFIELD_INSTALL is not set; tgc_sim will abort (no ion-mobility "
+              "table). Export GARFIELD_INSTALL=<...>/local/garfield before running.",
+              file=sys.stderr)
 
 
 def _check_gas(cfg: dict, config_name: str) -> bool:
@@ -151,9 +167,7 @@ def run(args) -> int:
         return 1
     cfg = json.loads(Path(TGC_DIR / args.config if not Path(args.config).is_absolute()
                           else args.config).read_text())
-    if cfg["simulation"].get("enable_ion_drift", False):
-        print("warning: enable_ion_drift is true — slow, and the observable becomes "
-              "induced charge, not bare gain.", file=sys.stderr)
+    _warn_ion_drift(cfg)
     if not _check_gas(cfg, args.config):
         return 1
 
@@ -196,6 +210,7 @@ def run(args) -> int:
 def emit(args) -> int:
     cfg = json.loads(Path(TGC_DIR / args.config if not Path(args.config).is_absolute()
                           else args.config).read_text())
+    _warn_ion_drift(cfg)
     if not _check_gas(cfg, args.config):
         return 1
     out_dir = Path(args.out)
@@ -328,6 +343,121 @@ def plot(args) -> int:
     return 0
 
 
+# ─────────────────── waveform shape test (position scan) ─────────────────────
+
+def waveform(args) -> int:
+    """Mean PEAK-NORMALIZED anode current waveform (electron + ion) vs position.
+
+    Reads each event's total anode current (t_signals `anode` branch) from every
+    tgc_sim.root under --out, keeps bins up to --tcut, divides each event by its
+    signed peak (the extremum over [0, tcut] -> +1), and averages per position.
+    Pools all batches (incremental, no waste); T_cut is chosen here, so re-running
+    with a different --tcut needs no re-simulation. Needs an ion-drift run
+    (config/scan_waveform.json) for the ion tail to be present.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import uproot
+
+    cfg = json.loads((TGC_DIR / args.config).read_text())
+    dt = cfg["simulation"]["time_step_ns"]
+    wires = _wire_positions_cm(cfg["geometry"])
+    out_dir = Path(args.out)
+    nkeep = int(np.floor(args.tcut / dt - 0.5)) + 1          # bins with centre <= tcut
+    if nkeep < 2:
+        raise SystemExit(f"--tcut {args.tcut} too small for time_step {dt} ns")
+
+    sums, counts = {}, {}
+    for root in sorted(out_dir.glob("**/tgc_sim.root")):
+        try:
+            with uproot.open(root) as f:
+                for name in f.keys(cycle=False):
+                    if name.rsplit("/", 1)[-1] != "t_signals":
+                        continue
+                    tag = name.rsplit("/", 1)[0]
+                    if _parse_tag(tag)[0] is None:
+                        continue
+                    M = np.asarray(f[name]["anode"].array().tolist(), dtype=float)
+                    if M.ndim != 2 or M.shape[0] == 0 or M.shape[1] < nkeep:
+                        continue
+                    W = M[:, :nkeep]
+                    peak = W[np.arange(W.shape[0]), np.argmax(np.abs(W), axis=1)]
+                    good = np.abs(peak) > 1e-12
+                    if not good.any():
+                        continue
+                    Wn = W[good] / peak[good, None]           # each event: peak -> +1
+                    sums[tag] = sums.get(tag, np.zeros(nkeep)) + Wn.sum(axis=0)
+                    counts[tag] = counts.get(tag, 0) + int(good.sum())
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: skipping {root}: {e}", file=sys.stderr)
+    if not counts:
+        raise SystemExit(f"no t_signals/anode waveforms found under {out_dir}")
+
+    t = (np.arange(nkeep) + 0.5) * dt
+    means = {tag: sums[tag] / counts[tag] for tag in counts}
+
+    rows = []
+    for tag, mean in means.items():
+        d, x = _parse_tag(tag)
+        for j in range(nkeep):
+            rows.append({"source_distance_mm": d, "x_position_cm": x,
+                         "time_ns": t[j], "mean_norm_current": mean[j],
+                         "n_events": counts[tag]})
+    csv_path = out_dir / "waveform_shapes.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    by_xy = {(round(_parse_tag(tag)[1], 4), round(_parse_tag(tag)[0], 4)): (means[tag], counts[tag])
+             for tag in means}
+
+    fig, (axo, axm) = plt.subplots(1, 2, figsize=(13, 5))
+    ys_all = sorted({round(_parse_tag(tag)[0], 4) for tag in means})
+    xs_all = sorted({round(_parse_tag(tag)[1], 4) for tag in means})
+
+    def _dwire_mm(xc):  # distance from the nearest wire [mm], grid-agnostic
+        return float(np.min(np.abs(xc - wires))) * 10.0
+
+    # representative positions by distance from the nearest wire: the most on-wire x
+    # vs the most mid-gap x, at the shallowest and deepest y. Robust for a half-pitch
+    # grid (wire at an edge) or a full-pitch one (wire in the middle).
+    x_on = min(xs_all, key=_dwire_mm)
+    x_mid = max(xs_all, key=_dwire_mm)
+    for (xv, yv) in [(x_on, ys_all[0]), (x_on, ys_all[-1]),
+                     (x_mid, ys_all[0]), (x_mid, ys_all[-1])]:
+        hit = by_xy.get((round(xv, 4), round(yv, 4)))
+        if hit:
+            mean, n = hit
+            axo.plot(t, mean, lw=1.3,
+                     label=f"x={xv*10:g}mm (d_wire={_dwire_mm(xv):.2g}mm), y={yv:g}mm, N={n}")
+    axo.axhline(0, color="k", lw=0.5)
+    axo.set_xlabel("time [ns]")
+    axo.set_ylabel("mean peak-normalized anode current")
+    axo.set_title(f"Anode pulse shape vs primary position  (T_cut={args.tcut:g} ns)")
+    axo.legend(fontsize=8)
+
+    tail = t > 5.0  # tail height relative to the unit peak (ion-tail content)
+    tdf = pd.DataFrame([{"x_position_cm": _parse_tag(tag)[1],
+                         "source_distance_mm": _parse_tag(tag)[0],
+                         "tail": float(means[tag][tail].mean())} for tag in means])
+    piv = tdf.pivot_table(index="source_distance_mm", columns="x_position_cm", values="tail")
+    im = axm.pcolormesh(piv.columns.to_numpy() * 10, piv.index.to_numpy(), piv.to_numpy(),
+                        shading="nearest", cmap="magma")
+    for xw in wires:
+        if piv.columns.min() <= xw <= piv.columns.max():
+            axm.axvline(xw * 10, color="white", lw=0.8, ls="--", alpha=0.6)
+    axm.set_xlabel("x [mm]  (dashed = wire)")
+    axm.set_ylabel("source depth [mm]")
+    axm.set_title("Ion-tail height  (mean norm. current, t > 5 ns)")
+    fig.colorbar(im, ax=axm, label="tail / peak")
+
+    fig.tight_layout()
+    png = out_dir / "waveform_shapes.png"
+    fig.savefig(png, dpi=130)
+    print(f"pooled {len(counts)} positions, {sum(counts.values())} events "
+          f"(T_cut={args.tcut:g} ns) -> {csv_path}\nwrote {png}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -362,6 +492,16 @@ def main() -> int:
     pp.add_argument("--rms", action="store_true",
                     help="also report per-point gain mean/rms/sem")
     pp.set_defaults(func=plot)
+
+    pw = sub.add_parser("waveform",
+                        help="mean peak-normalized anode current shape vs position "
+                             "(ion-drift run; --tcut selectable)")
+    pw.add_argument("--out", required=True, help="scan root (pools all batches under it)")
+    pw.add_argument("--config", default="config/scan_waveform.json",
+                    help="config used for the run (for time_step_ns + geometry)")
+    pw.add_argument("--tcut", type=float, default=100.0,
+                    help="analysis cutoff time [ns] (default 100; <= captured time_window_ns)")
+    pw.set_defaults(func=waveform)
 
     args = ap.parse_args()
     return args.func(args)

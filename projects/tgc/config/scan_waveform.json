@@ -1,0 +1,64 @@
+{
+  "_comment": "Average normalized anode current-waveform scan (see tools/gain_scan.py waveform). Like scan_gain.json but with ion drift ON so the waveform includes both the electron spike and the ion tail; time_window_ns=150 captures the shape up to any analysis cutoff T_cut <= 150 ns (default 100). energy_keV=0.026 -> nPrimary=1 (single primary; normalization removes the scale). REQUIRES GARFIELD_INSTALL at runtime (ion-mobility table), unlike the gain scan. max_avalanche_size is capped LOW (10000, vs the gain scan's 500000) because ion-drift cost scales with the ion count (~one ion per avalanche electron): an uncapped Polya-tail event near 5e5 means ~5e5 ion drifts = minutes/event. The PEAK-NORMALIZED SHAPE is gain-independent (electron spike and ion tail both scale with gain, so their ratio is fixed), so the cap bounds the cost without changing the measured shape. The gas block is byte-identical to default_tgc.json so the committed .gas table is reused.",
+  "geometry": {
+    "wire_pitch_cm": 0.18,
+    "wire_diameter_um": 50.0,
+    "gap_cm": 0.14,
+    "n_wires": 10,
+    "wire_voltage_V": 1900.0,
+    "sense_wires": null
+  },
+  "readout": {
+    "type": "conductive"
+  },
+  "amplifier": {
+    "enable": false
+  },
+  "source": {
+    "energy_keV": 0.026,
+    "source_distances_mm": [
+      0.1,
+      0.4,
+      0.7,
+      1.0,
+      1.3
+    ],
+    "x_positions_cm": [
+      0.09,
+      0.1,
+      0.11,
+      0.12,
+      0.13,
+      0.14,
+      0.15,
+      0.16,
+      0.17,
+      0.18
+    ]
+  },
+  "gas": {
+    "gas1": "ar",
+    "gas1_fraction_pct": 70.0,
+    "gas2": "co2",
+    "ion_species": "co2",
+    "temperature_K": 293.15,
+    "pressure_Torr": 760.0,
+    "enable_penning": true,
+    "n_magboltz_collisions": 2,
+    "w_value_eV": 26.0,
+    "max_electron_energy_eV": 2000.0,
+    "n_field_points": 10,
+    "e_field_min_vcm": 100.0,
+    "e_field_max_vcm": 400000.0
+  },
+  "simulation": {
+    "n_events": 30,
+    "max_avalanche_size": 10000,
+    "time_window_ns": 150.0,
+    "time_step_ns": 0.5,
+    "enable_ion_drift": true,
+    "store_drift_lines": false,
+    "ion_max_step_um": 5.0,
+    "random_seed": 0
+  }
+}
