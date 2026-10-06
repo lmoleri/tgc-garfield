@@ -346,14 +346,17 @@ def plot(args) -> int:
 # ─────────────────── waveform shape test (position scan) ─────────────────────
 
 def waveform(args) -> int:
-    """Mean PEAK-NORMALIZED anode current waveform (electron + ion) vs position.
+    """Mean PEAK-ALIGNED, peak-normalized anode pulse shape (electron + ion) vs position.
 
-    Reads each event's total anode current (t_signals `anode` branch) from every
-    tgc_sim.root under --out, keeps bins up to --tcut, divides each event by its
-    signed peak (the extremum over [0, tcut] -> +1), and averages per position.
-    Pools all batches (incremental, no waste); T_cut is chosen here, so re-running
-    with a different --tcut needs no re-simulation. Needs an ion-drift run
-    (config/scan_waveform.json) for the ion tail to be present.
+    For every event (t_signals `anode` branch) under --out: find the current peak (the
+    electron spike), normalize so the peak is +1, and TIME-ALIGN it so the spike sits at
+    t'=0, then average per position. Aligning removes the per-event drift-time jitter
+    (which otherwise smears the mean peak below 1) and the position-dependent drift
+    offset, so the mean shape peaks at ~1 and positions overlay — differences then live
+    in the ion tail. The spike time itself (= electron drift-time to the wire) is kept as
+    a separate observable (waveform_drift.csv + map). Pools all batches (incremental);
+    --tcut (ns of tail kept after the spike) is chosen here, no re-simulation. Needs an
+    ion-drift run (config/scan_waveform.json) for the ion tail.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -364,11 +367,15 @@ def waveform(args) -> int:
     dt = cfg["simulation"]["time_step_ns"]
     wires = _wire_positions_cm(cfg["geometry"])
     out_dir = Path(args.out)
-    nkeep = int(np.floor(args.tcut / dt - 0.5)) + 1          # bins with centre <= tcut
-    if nkeep < 2:
+    n_pre = int(round(5.0 / dt))                             # bins shown before the spike
+    n_post = int(np.floor(args.tcut / dt - 0.5)) + 1        # bins of tail kept after it
+    if n_post < 2:
         raise SystemExit(f"--tcut {args.tcut} too small for time_step {dt} ns")
+    alen = n_pre + n_post
+    search = int(round(50.0 / dt))                          # spike is within ~50 ns (max drift)
 
-    sums, counts = {}, {}
+    asum, acnt = {}, {}          # per-bin aligned sum / count (edge-safe)
+    dsum, dsq, nev = {}, {}, {}  # drift-time (spike-time) accumulators
     for root in sorted(out_dir.glob("**/tgc_sim.root")):
         try:
             with uproot.open(root) as f:
@@ -379,49 +386,76 @@ def waveform(args) -> int:
                     if _parse_tag(tag)[0] is None:
                         continue
                     M = np.asarray(f[name]["anode"].array().tolist(), dtype=float)
-                    if M.ndim != 2 or M.shape[0] == 0 or M.shape[1] < nkeep:
+                    if M.ndim != 2 or M.shape[0] == 0:
                         continue
-                    W = M[:, :nkeep]
-                    peak = W[np.arange(W.shape[0]), np.argmax(np.abs(W), axis=1)]
+                    nb = M.shape[1]
+                    pk = np.argmax(np.abs(M[:, :min(search, nb)]), axis=1)  # spike bin / event
+                    peak = M[np.arange(M.shape[0]), pk]
                     good = np.abs(peak) > 1e-12
                     if not good.any():
                         continue
-                    Wn = W[good] / peak[good, None]           # each event: peak -> +1
-                    sums[tag] = sums.get(tag, np.zeros(nkeep)) + Wn.sum(axis=0)
-                    counts[tag] = counts.get(tag, 0) + int(good.sum())
+                    a = asum.setdefault(tag, np.zeros(alen))
+                    c = acnt.setdefault(tag, np.zeros(alen))
+                    for e in np.nonzero(good)[0]:               # align each event to its spike
+                        p = int(pk[e]); lo, hi = p - n_pre, p + n_post
+                        sa, sb = max(0, lo), min(nb, hi)        # clip to the stored window
+                        da = sa - lo
+                        a[da:da + (sb - sa)] += M[e, sa:sb] / peak[e]
+                        c[da:da + (sb - sa)] += 1.0
+                    tpk = (pk[good] + 0.5) * dt                 # spike time = drift time to wire
+                    dsum[tag] = dsum.get(tag, 0.0) + float(tpk.sum())
+                    dsq[tag] = dsq.get(tag, 0.0) + float((tpk ** 2).sum())
+                    nev[tag] = nev.get(tag, 0) + int(good.sum())
         except Exception as e:  # noqa: BLE001
             print(f"warning: skipping {root}: {e}", file=sys.stderr)
-    if not counts:
+    if not nev:
         raise SystemExit(f"no t_signals/anode waveforms found under {out_dir}")
 
-    t = (np.arange(nkeep) + 0.5) * dt
-    means = {tag: sums[tag] / counts[tag] for tag in counts}
+    t = (np.arange(alen) - n_pre) * dt                       # time since spike [ns] (peak at 0)
+    means = {tag: np.divide(asum[tag], acnt[tag],
+                            out=np.full(alen, np.nan), where=acnt[tag] > 0) for tag in asum}
+    drift = {tag: (dsum[tag] / nev[tag],
+                   float(np.sqrt(max(0.0, dsq[tag] / nev[tag] - (dsum[tag] / nev[tag]) ** 2))))
+             for tag in nev}
 
     rows = []
     for tag, mean in means.items():
         d, x = _parse_tag(tag)
-        for j in range(nkeep):
+        for j in range(alen):
             rows.append({"source_distance_mm": d, "x_position_cm": x,
-                         "time_ns": t[j], "mean_norm_current": mean[j],
-                         "n_events": counts[tag]})
+                         "time_since_peak_ns": t[j], "mean_norm_current": mean[j],
+                         "n_events": nev[tag]})
     csv_path = out_dir / "waveform_shapes.csv"
     pd.DataFrame(rows).to_csv(csv_path, index=False)
-
-    by_xy = {(round(_parse_tag(tag)[1], 4), round(_parse_tag(tag)[0], 4)): (means[tag], counts[tag])
-             for tag in means}
-
-    fig, (axo, axm) = plt.subplots(1, 2, figsize=(13, 5))
-    ys_all = sorted({round(_parse_tag(tag)[0], 4) for tag in means})
-    xs_all = sorted({round(_parse_tag(tag)[1], 4) for tag in means})
+    drift_path = out_dir / "waveform_drift.csv"
+    pd.DataFrame([{"source_distance_mm": _parse_tag(tag)[0], "x_position_cm": _parse_tag(tag)[1],
+                   "mean_drift_ns": drift[tag][0], "rms_drift_ns": drift[tag][1],
+                   "n_events": nev[tag]} for tag in drift]).to_csv(drift_path, index=False)
 
     def _dwire_mm(xc):  # distance from the nearest wire [mm], grid-agnostic
         return float(np.min(np.abs(xc - wires))) * 10.0
 
-    # representative positions by distance from the nearest wire: the most on-wire x
-    # vs the most mid-gap x, at the shallowest and deepest y. Robust for a half-pitch
-    # grid (wire at an edge) or a full-pitch one (wire in the middle).
-    x_on = min(xs_all, key=_dwire_mm)
-    x_mid = max(xs_all, key=_dwire_mm)
+    def _map(ax, valfn, title, cbar, cmap):
+        d = pd.DataFrame([{"x_position_cm": _parse_tag(tag)[1],
+                           "source_distance_mm": _parse_tag(tag)[0],
+                           "v": valfn(tag)} for tag in means])
+        piv = d.pivot_table(index="source_distance_mm", columns="x_position_cm", values="v")
+        im = ax.pcolormesh(piv.columns.to_numpy() * 10, piv.index.to_numpy(), piv.to_numpy(),
+                           shading="nearest", cmap=cmap)
+        for xw in wires:
+            if piv.columns.min() <= xw <= piv.columns.max():
+                ax.axvline(xw * 10, color="white", lw=0.8, ls="--", alpha=0.6)
+        ax.set_xlabel("x [mm]  (dashed = wire)")
+        ax.set_ylabel("source depth [mm]")
+        ax.set_title(title)
+        fig.colorbar(im, ax=ax, label=cbar)
+
+    by_xy = {(round(_parse_tag(tag)[1], 4), round(_parse_tag(tag)[0], 4)): (means[tag], nev[tag])
+             for tag in means}
+    fig, (axo, axt, axd) = plt.subplots(1, 3, figsize=(18, 5))
+    ys_all = sorted({round(_parse_tag(tag)[0], 4) for tag in means})
+    xs_all = sorted({round(_parse_tag(tag)[1], 4) for tag in means})
+    x_on, x_mid = min(xs_all, key=_dwire_mm), max(xs_all, key=_dwire_mm)
     for (xv, yv) in [(x_on, ys_all[0]), (x_on, ys_all[-1]),
                      (x_mid, ys_all[0]), (x_mid, ys_all[-1])]:
         hit = by_xy.get((round(xv, 4), round(yv, 4)))
@@ -430,31 +464,23 @@ def waveform(args) -> int:
             axo.plot(t, mean, lw=1.3,
                      label=f"x={xv*10:g}mm (d_wire={_dwire_mm(xv):.2g}mm), y={yv:g}mm, N={n}")
     axo.axhline(0, color="k", lw=0.5)
-    axo.set_xlabel("time [ns]")
+    axo.axvline(0, color="0.6", lw=0.5, ls=":")
+    axo.set_xlabel("time since spike [ns]")
     axo.set_ylabel("mean peak-normalized anode current")
-    axo.set_title(f"Anode pulse shape vs primary position  (T_cut={args.tcut:g} ns)")
+    axo.set_title(f"Peak-aligned anode pulse shape  (T_cut={args.tcut:g} ns)")
     axo.legend(fontsize=8)
 
-    tail = t > 5.0  # tail height relative to the unit peak (ion-tail content)
-    tdf = pd.DataFrame([{"x_position_cm": _parse_tag(tag)[1],
-                         "source_distance_mm": _parse_tag(tag)[0],
-                         "tail": float(means[tag][tail].mean())} for tag in means])
-    piv = tdf.pivot_table(index="source_distance_mm", columns="x_position_cm", values="tail")
-    im = axm.pcolormesh(piv.columns.to_numpy() * 10, piv.index.to_numpy(), piv.to_numpy(),
-                        shading="nearest", cmap="magma")
-    for xw in wires:
-        if piv.columns.min() <= xw <= piv.columns.max():
-            axm.axvline(xw * 10, color="white", lw=0.8, ls="--", alpha=0.6)
-    axm.set_xlabel("x [mm]  (dashed = wire)")
-    axm.set_ylabel("source depth [mm]")
-    axm.set_title("Ion-tail height  (mean norm. current, t > 5 ns)")
-    fig.colorbar(im, ax=axm, label="tail / peak")
+    tailmask = t > 5.0
+    _map(axt, lambda tg: float(np.nanmean(means[tg][tailmask])),
+         "Ion-tail height  (mean norm. current, >5 ns after spike)", "tail / peak", "magma")
+    _map(axd, lambda tg: drift[tg][0],
+         "Electron drift time to wire  (mean spike time)", "drift time [ns]", "viridis")
 
     fig.tight_layout()
     png = out_dir / "waveform_shapes.png"
     fig.savefig(png, dpi=130)
-    print(f"pooled {len(counts)} positions, {sum(counts.values())} events "
-          f"(T_cut={args.tcut:g} ns) -> {csv_path}\nwrote {png}")
+    print(f"pooled {len(nev)} positions, {sum(nev.values())} events (T_cut={args.tcut:g} ns)\n"
+          f"  shapes -> {csv_path}\n  drift  -> {drift_path}\n  plot   -> {png}")
     return 0
 
 
