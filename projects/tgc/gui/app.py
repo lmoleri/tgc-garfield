@@ -3564,6 +3564,9 @@ class MainWindow(QMainWindow):
         # Give the results tabs live access to the Readout settings (E-Field /
         # Weighting Field tabs mark the readout cathode + resistive layer).
         self.results_panel.config_panel = self.config_panel
+        # Give the 55Fe MC tab the live detector config (for maps-vs-config validation).
+        if getattr(self.results_panel, "fe55_mc_panel", None) is not None:
+            self.results_panel.fe55_mc_panel.config_panel = self.config_panel
 
         splitter.addWidget(self.config_panel)
         splitter.addWidget(self.results_panel)

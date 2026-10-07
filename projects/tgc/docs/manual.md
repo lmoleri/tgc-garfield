@@ -437,15 +437,27 @@ E-Field tabs are interactive straight from the geometry spinboxes — no run nee
 
 The **⁵⁵Fe MC** tab (`gui/fe55_mc_panel.py`) runs the Monte Carlo signal studies (§14) in a background
 `QThread` — reusing `fe55_mc.py`'s compute API (`load_maps` / `run_exposure` / `run_grid` / `run_inspect`)
-**in-process** — and renders them as **interactive Plotly** figures embedded via `QWebEngineView`.
-Focused controls (study, photons, seed, gain model, collimator diameter/center, events/position, and the
-input-map/config paths) drive a per-study **view selector** that rebuilds the figure instantly from
-cached data: the charge and pulse-height spectra (with a self-calibrated energy axis), the collimator
-comparison, the position-grid observable maps / FWHM / shape sweeps / per-point distributions (with
-depth and distance-from-wire selectors) / corner waveforms, and single-event pulses overlaid with their
-per-primary charge-arrival microstructure. It consumes only the committed scan products
-(`results/scan_waveform_halfpitch`, `results/gain_scan_halfpitch`) — no `tgc_sim`/Garfield run is needed.
-It is optional: if `plotly` / `PyQtWebEngine` are missing the tab is simply omitted.
+**in-process** — and renders them as **interactive Plotly** figures (via `QWebEngineView`) in a
+**separate plot window**. Focused controls (study, photons, seed, gain model, collimator diameter/center,
+events/position, the position-grid resolution and extent, and the input-map/config paths) drive a
+per-study **view selector** that rebuilds the figure instantly from cached data: the charge and
+pulse-height spectra (with a self-calibrated energy axis), the collimator comparison, the position-grid
+observable maps / FWHM / shape sweeps / per-point distributions (with depth and distance-from-wire
+selectors) / corner waveforms, and single-event pulses overlaid with their per-primary charge-arrival
+microstructure. The grid resolution/extent are adjustable (drift and timing interpolate; the gain stays
+at the native measured-cell resolution). A fifth study, **"Underlying data (maps)"**, plots the
+Garfield-measured inputs the MC is built on — the gain (`avalanche_size`) Polya at a selectable grid
+point, the drift-time map, and the single-electron shape — and shows the config the maps were made with.
+
+To keep results meaningful, a run is **validated** against the data it needs: the maps must exist, the
+detector config (geometry/gas/voltage from the left ConfigPanel) must match the maps' `run_config.json`
+signature, and the requested grid points must be measured. If anything is missing or mismatched an
+**error box** names the problem and offers to **run the Garfield simulation** — a background
+`GarfieldScanRunner` that builds temp scan configs from the current detector config + the requested
+grid and drives `gain_scan.py` (gain + waveform scans via `tgc_sim`) into the map dirs, with a time
+warning and incremental accumulation. Otherwise it consumes the committed scan products
+(`results/scan_waveform_halfpitch`, `results/gain_scan_halfpitch`) — no Garfield run needed. The tab is
+optional: if `plotly` / `PyQtWebEngine` are missing it is simply omitted.
 
 ---
 
