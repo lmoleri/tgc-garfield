@@ -761,13 +761,18 @@ def run_exposure(bundle, phys, rng, n, gain_mode, collimator=None, keep_samples=
                     bundle["T"], bundle["dt"], gain_mode, rng, keep_samples=keep_samples)
 
 
-def run_grid(bundle, phys, cfg, rng, gain_mode, n_per_point, progress=None, cancel=None):
-    """Scan every (depth, distance-from-wire) grid point -> (scan_res, scan_meta).
-    `progress(done, total)` and `cancel()->bool` are optional callbacks for the GUI."""
+def run_grid(bundle, phys, cfg, rng, gain_mode, n_per_point,
+             depths=None, dists=None, progress=None, cancel=None):
+    """Scan a (depth, distance-from-wire) grid -> (scan_res, scan_meta). Defaults to the
+    native map grid; pass `depths`/`dists` (mm) for a custom resolution/extent — they are
+    clamped to the measured extent and de-duplicated (drift is interpolated, gain is taken
+    from the nearest measured cell). `progress(done,total)`/`cancel()->bool` are GUI hooks."""
     ys, ds, wires = bundle["ys"], bundle["ds"], bundle["wires"]
+    depths = ys if depths is None else np.unique(np.clip(np.asarray(depths, float), ys[0], ys[-1]))
+    dists = ds if dists is None else np.unique(np.clip(np.asarray(dists, float), ds[0], ds[-1]))
     wire0 = wires[len(wires) // 2]
     specs = [(f"y{yv:g}_d{dv:g}", float(wire0 + dv / 10.0), float(yv), float(dv))
-             for yv in ys for dv in ds]
+             for yv in depths for dv in dists]
     scan_res, scan_meta = {}, {}
     for k, (name, x_cm, depth_mm, d_mm) in enumerate(specs):
         if cancel is not None and cancel():
