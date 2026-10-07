@@ -73,6 +73,17 @@ TGC_DIR          = (SCRIPT_DIR / "..").resolve()                # …/projects/t
 BINARY           = TGC_DIR / "build" / "tgc_sim"
 GARFIELD_INSTALL = (TGC_DIR / "../../local/garfield").resolve() # …/local/garfield/
 
+# The 55Fe Monte Carlo panel (interactive Plotly via QtWebEngine). Imported at module
+# load — before QApplication — as QtWebEngine requires; guarded so a missing optional
+# dependency (plotly / PyQtWebEngine) only drops the MC tab rather than the whole GUI.
+sys.path.insert(0, str(SCRIPT_DIR))
+try:
+    from fe55_mc_panel import Fe55MCPanel
+    _HAS_MC_PANEL = True
+except Exception as _mc_exc:  # noqa: BLE001
+    print(f"[GUI] 55Fe MC panel unavailable: {_mc_exc}")
+    _HAS_MC_PANEL = False
+
 
 # ---------------------------------------------------------------------------
 # Gas filename derivation
@@ -1197,6 +1208,11 @@ class ResultsPanel(QTabWidget):
         # ── Plots tab: 2×3 matplotlib figure ─────────────────────────────
         self.plots_canvas = MplCanvas(nrows=2, ncols=3, figsize=(11, 5))
         self.addTab(self.plots_canvas, "Plots")
+
+        # ── 55Fe Monte Carlo tab: interactive Plotly signal studies ──────
+        if _HAS_MC_PANEL:
+            self.fe55_mc_panel = Fe55MCPanel(log_cb=self.append_log)
+            self.addTab(self.fe55_mc_panel, "⁵⁵Fe MC")
 
         # ── Waveforms tab: ROOT TCanvas browser ──────────────────────────
         self._waveform_data: dict = {}
@@ -3725,6 +3741,8 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 
 def main():
+    # QtWebEngine (the 55Fe MC tab) needs a shared GL context set before the app exists.
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName("TGC Simulation")
     win = MainWindow()

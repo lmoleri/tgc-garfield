@@ -730,6 +730,71 @@ def _plot_sweep(meta, scan_res, out):
     fig.savefig(out / "fe55_sweep.png", dpi=130)
 
 
+# ─────────────────────── reusable compute API (CLI + GUI) ──────────────────
+
+def load_maps(shape_dir, gain_dir, cfg, tcut):
+    """Load every position-scan input once into a bundle reused across studies."""
+    wires = _wire_positions_cm(cfg["geometry"])
+    ts, S, ipk = load_shape(Path(shape_dir), tcut)
+    ys, ds, tau, rms = _grid_from_drift(Path(shape_dir), wires)
+    cells, gmean, grms = load_gain_cells(Path(gain_dir), wires, ys, ds)
+    dt = cfg["run"]["out_time_step_ns"]
+    T = np.arange(-10.0, float(np.nanmax(tau)) + tcut + 15.0 + dt, dt)
+    maps = {"ys": ys, "ds": ds, "tau": tau, "rms": rms,
+            "cells": cells, "gmean": gmean, "grms": grms, "wires": wires}
+    return {"ts": ts, "S": S, "ipk": ipk, "ys": ys, "ds": ds, "wires": wires,
+            "maps": maps, "T": T, "dt": dt, "gmean_mean": float(np.nanmean(gmean))}
+
+
+def build_phys(cfg, wires):
+    """Assemble the physics-knob dict passed through the generator and transport."""
+    return {"w": cfg["gas"]["w_value_eV"], "F": cfg["gas"]["fano_factor"],
+            "gap_cm": cfg["geometry"]["gap_cm"], "pitch_cm": cfg["geometry"]["wire_pitch_cm"],
+            "lam5900": cfg["gas"]["atten_len_5900_cm"], "lam2960": cfg["gas"]["atten_len_2960_cm"],
+            "xray": cfg["xray"], "trk": cfg["track"], "diff": cfg["diffusion"], "wires": wires}
+
+
+def run_exposure(bundle, phys, rng, n, gain_mode, collimator=None, keep_samples=0):
+    """One realistic (optionally collimated) exposure of n photons -> result dict."""
+    convs = realistic_convs(n, phys, rng, collimator=collimator)
+    return simulate(convs, phys, bundle["maps"], bundle["S"], bundle["ipk"],
+                    bundle["T"], bundle["dt"], gain_mode, rng, keep_samples=keep_samples)
+
+
+def run_grid(bundle, phys, cfg, rng, gain_mode, n_per_point, progress=None, cancel=None):
+    """Scan every (depth, distance-from-wire) grid point -> (scan_res, scan_meta).
+    `progress(done, total)` and `cancel()->bool` are optional callbacks for the GUI."""
+    ys, ds, wires = bundle["ys"], bundle["ds"], bundle["wires"]
+    wire0 = wires[len(wires) // 2]
+    specs = [(f"y{yv:g}_d{dv:g}", float(wire0 + dv / 10.0), float(yv), float(dv))
+             for yv in ys for dv in ds]
+    scan_res, scan_meta = {}, {}
+    for k, (name, x_cm, depth_mm, d_mm) in enumerate(specs):
+        if cancel is not None and cancel():
+            break
+        E = _pick_line(cfg["xray"], rng)
+        convs = [(x_cm, -depth_mm / 10.0, 0.0, E) for _ in range(n_per_point)]
+        scan_res[name] = simulate(convs, phys, bundle["maps"], bundle["S"], bundle["ipk"],
+                                  bundle["T"], bundle["dt"], gain_mode, rng, keep_samples=0)
+        scan_meta[name] = {"x_cm": x_cm, "depth_mm": depth_mm, "d_wire_mm": d_mm}
+        if progress is not None:
+            progress(k + 1, len(specs))
+    return scan_res, scan_meta
+
+
+def run_inspect(bundle, phys, cfg, rng, gain_mode, n_keep):
+    """Single-event records at each config scan point -> {name: [record, ...]}."""
+    npool = max(8 * n_keep, 24)
+    recs_by_pos = {}
+    for sp in cfg["scan_points"]:
+        E = _pick_line(cfg["xray"], rng)            # one line draw per point (matches CLI)
+        convs = [(sp["x_cm"], -sp["depth_mm"] / 10.0, 0.0, E) for _ in range(npool)]
+        r = simulate(convs, phys, bundle["maps"], bundle["S"], bundle["ipk"],
+                     bundle["T"], bundle["dt"], gain_mode, rng, keep_records=n_keep)
+        recs_by_pos[sp["name"]] = r["records"]
+    return recs_by_pos
+
+
 # ──────────────────────────────────── main ─────────────────────────────────
 
 def main() -> int:
@@ -770,35 +835,19 @@ def main() -> int:
 
     shape_dir, gain_dir, out = Path(args.shape_dir), Path(args.gain_dir), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    wires = _wire_positions_cm(cfg["geometry"])
 
     print(f"loading maps:  shape={shape_dir.name}  gain={gain_dir.name}")
-    ts, S, ipk = load_shape(shape_dir, tcut)
-    ys, ds, tau, rms = _grid_from_drift(shape_dir, wires)
-    cells, gmean, grms = load_gain_cells(gain_dir, wires, ys, ds)
-    print(f"  shape: {len(S)} bins, t'=[{ts[0]:g},{ts[-1]:g}]ns, peak@idx{ipk}; "
-          f"grid: {len(ys)} depths x {len(ds)} d; <g>={np.nanmean(gmean):.0f}")
-
-    phys = {
-        "w": cfg["gas"]["w_value_eV"], "F": cfg["gas"]["fano_factor"],
-        "gap_cm": cfg["geometry"]["gap_cm"], "pitch_cm": cfg["geometry"]["wire_pitch_cm"],
-        "lam5900": cfg["gas"]["atten_len_5900_cm"], "lam2960": cfg["gas"]["atten_len_2960_cm"],
-        "xray": cfg["xray"], "trk": cfg["track"], "diff": cfg["diffusion"], "wires": wires,
-    }
-    maps = {"ys": ys, "ds": ds, "tau": tau, "rms": rms,
-            "cells": cells, "gmean": gmean, "grms": grms, "wires": wires}
-    T = np.arange(-10.0, float(np.nanmax(tau)) + tcut + 15.0 + dt, dt)
+    bundle = load_maps(shape_dir, gain_dir, cfg, tcut)
+    wires, S, ipk, T, maps = bundle["wires"], bundle["S"], bundle["ipk"], bundle["T"], bundle["maps"]
+    phys = build_phys(cfg, wires)
+    print(f"  shape: {len(S)} bins, t'=[{bundle['ts'][0]:g},{bundle['ts'][-1]:g}]ns, peak@idx{ipk}; "
+          f"grid: {len(bundle['ys'])} depths x {len(bundle['ds'])} d; <g>={bundle['gmean_mean']:.0f}")
 
     if args.inspect:                                     # standalone single-event inspection
         nkeep = max(1, args.inspect_events)
-        npool = max(8 * nkeep, 24)
-        recs_by_pos = {}
-        for sp in cfg["scan_points"]:
-            E = _pick_line(cfg["xray"], rng)
-            convs = [(sp["x_cm"], -sp["depth_mm"] / 10.0, 0.0, E) for _ in range(npool)]
-            r = simulate(convs, phys, maps, S, ipk, T, dt, args.gain, rng, keep_records=nkeep)
-            recs_by_pos[sp["name"]] = r["records"]
-            print(f"  inspect '{sp['name']}': {len(r['records'])}/{nkeep} events kept")
+        recs_by_pos = run_inspect(bundle, phys, cfg, rng, args.gain, nkeep)
+        for name, recs in recs_by_pos.items():
+            print(f"  inspect '{name}': {len(recs)}/{nkeep} events kept")
         _plot_single(recs_by_pos, out, T)
         print(f"done -> {out}/  (fe55_single.png)")
         return 0
@@ -806,28 +855,24 @@ def main() -> int:
     scan_res, scan_meta, incl_res = {}, {}, None
     if args.mode in ("both", "scan"):
         if args.scan_grid:                               # every measured map grid point
-            wire0 = wires[len(wires) // 2]
-            specs = [(f"y{yv:g}_d{dv:g}", float(wire0 + dv / 10.0), float(yv), float(dv))
-                     for yv in ys for dv in ds]
-            print(f"  scan grid: {len(specs)} points x {run['n_photons_scan']} photons")
+            print(f"  scan grid: {len(bundle['ys']) * len(bundle['ds'])} points "
+                  f"x {run['n_photons_scan']} photons")
+            scan_res, scan_meta = run_grid(bundle, phys, cfg, rng, args.gain, run["n_photons_scan"])
         else:
-            specs = [(sp["name"], float(sp["x_cm"]), float(sp["depth_mm"]),
-                      float(np.min(np.abs(sp["x_cm"] - wires)) * 10.0))
-                     for sp in cfg["scan_points"]]
-        for name, x_cm, depth_mm, d_mm in specs:
-            E = _pick_line(cfg["xray"], rng)
-            convs = [(x_cm, -depth_mm / 10.0, 0.0, E) for _ in range(run["n_photons_scan"])]
-            scan_res[name] = simulate(convs, phys, maps, S, ipk, T, dt,
-                                      args.gain, rng, keep_samples=0)
-            scan_meta[name] = {"x_cm": x_cm, "depth_mm": depth_mm, "d_wire_mm": d_mm}
-            r = scan_res[name]
-            if not args.scan_grid:
-                print(f"  scan '{name}': N={r['n']}  <Q>={r['Q'].mean():.0f}  "
+            for sp in cfg["scan_points"]:
+                x_cm, depth_mm = float(sp["x_cm"]), float(sp["depth_mm"])
+                d_mm = float(np.min(np.abs(x_cm - wires)) * 10.0)
+                E = _pick_line(cfg["xray"], rng)
+                convs = [(x_cm, -depth_mm / 10.0, 0.0, E) for _ in range(run["n_photons_scan"])]
+                scan_res[sp["name"]] = simulate(convs, phys, maps, S, ipk, T, dt,
+                                                args.gain, rng, keep_samples=0)
+                scan_meta[sp["name"]] = {"x_cm": x_cm, "depth_mm": depth_mm, "d_wire_mm": d_mm}
+                r = scan_res[sp["name"]]
+                print(f"  scan '{sp['name']}': N={r['n']}  <Q>={r['Q'].mean():.0f}  "
                       f"peak-t={np.nanmean(r['tpeak']):.1f}ns  rise={np.nanmean(r['rise']):.1f}ns")
     outputs = []
     if args.mode in ("both", "realistic"):
-        incl_res = simulate(realistic_convs(n_real, phys, rng), phys, maps, S, ipk, T, dt,
-                            args.gain, rng, keep_samples=8)
+        incl_res = run_exposure(bundle, phys, rng, n_real, args.gain, keep_samples=8)
         exposures = [("full-cell uniform", "", incl_res)]      # (label, fname_tag, res)
         if args.collimator:                                    # circular aperture on a wire / between wires
             wire0 = wires[len(wires) // 2]
@@ -836,8 +881,7 @@ def main() -> int:
             for ctr in centers:
                 cx = wire0 + (pitch_cm / 2 if ctr == "gap" else 0.0)
                 coll = {"r_cm": args.collimator / 2.0 / 10.0, "center_cm": cx}
-                cres = simulate(realistic_convs(n_real, phys, rng, collimator=coll),
-                                phys, maps, S, ipk, T, dt, args.gain, rng, keep_samples=0)
+                cres = run_exposure(bundle, phys, rng, n_real, args.gain, collimator=coll, keep_samples=0)
                 exposures.append((f"collimated {args.collimator:g}mm on-{ctr}", f"collim_{ctr}", cres))
         # charge spectrum AND peak-amplitude (pulse-height) spectrum for every exposure
         for quantity, qtag in (("charge", "spectrum"), ("amplitude", "amplitude")):
