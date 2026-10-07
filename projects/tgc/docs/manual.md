@@ -417,7 +417,7 @@ over the wire span).
   readout element's $\lvert Z\rvert$ at two reference frequencies plus the pad-cap sink's $C_\mathrm{pad}$,
   $\tau_\mathrm{in}$, $f_c$ live — mirroring the C++ `ComputePadBackplaneCapPf` / `ComputeResistiveParams`
   (§8), so a mistuned front-end is obvious before running.
-- **`ResultsPanel(QTabWidget)`** — nine result tabs (`uproot` opens the ROOT file, PyROOT draws):
+- **`ResultsPanel(QTabWidget)`** — ten result tabs (`uproot` opens the ROOT file, PyROOT draws):
 
 | Tab | Shows |
 |---|---|
@@ -430,9 +430,22 @@ over the wire span).
 | E-Field | 2D $\lvert E\rvert$ / $V$ / $E_z$ / $E_x$ maps in XY / XZ / YZ planes |
 | Weighting Field | per-electrode $W$ / $\lvert E_w\rvert$ for `anode`/`cathode`/`cathode_top`; $\alpha$-scaled cathode in resistive mode |
 | Magboltz | gas transport properties from the `_props.csv` sidecar |
+| ⁵⁵Fe MC | interactive Plotly signal studies (§14): spectra, collimator comparison, position grid, single events |
 
 A shared **Amplifier / Raw** selector keeps Waveforms + Integrals in sync. The Weighting-Field and
 E-Field tabs are interactive straight from the geometry spinboxes — no run needed.
+
+The **⁵⁵Fe MC** tab (`gui/fe55_mc_panel.py`) runs the Monte Carlo signal studies (§14) in a background
+`QThread` — reusing `fe55_mc.py`'s compute API (`load_maps` / `run_exposure` / `run_grid` / `run_inspect`)
+**in-process** — and renders them as **interactive Plotly** figures embedded via `QWebEngineView`.
+Focused controls (study, photons, seed, gain model, collimator diameter/center, events/position, and the
+input-map/config paths) drive a per-study **view selector** that rebuilds the figure instantly from
+cached data: the charge and pulse-height spectra (with a self-calibrated energy axis), the collimator
+comparison, the position-grid observable maps / FWHM / shape sweeps / per-point distributions (with
+depth and distance-from-wire selectors) / corner waveforms, and single-event pulses overlaid with their
+per-primary charge-arrival microstructure. It consumes only the committed scan products
+(`results/scan_waveform_halfpitch`, `results/gain_scan_halfpitch`) — no `tgc_sim`/Garfield run is needed.
+It is optional: if `plotly` / `PyQtWebEngine` are missing the tab is simply omitted.
 
 ---
 
