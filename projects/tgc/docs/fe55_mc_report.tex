@@ -1,0 +1,413 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+\graphicspath{{../results/fe55_mc/}{../results/scan_waveform_halfpitch/}}
+
+\newcommand{\Fe}{\textsuperscript{55}Fe}
+\newcommand{\co}{CO\textsubscript{2}}
+
+\title{A Data-Driven Monte Carlo of \Fe{} Signals\\ in the Thin Gap Chamber}
+\author{TGC Garfield\texttt{++} simulation study}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note describes a light, \emph{data-driven} Monte Carlo that synthesizes full \Fe{} detector
+signals in a Thin Gap Chamber (TGC) by superposing the \emph{measured} single-electron response over a
+realistic cloud of primary electrons, with no further Garfield\texttt{++} microsimulation. Each primary
+electron is given its own drift delay and avalanche gain, drawn from position-resolved maps obtained in
+a prior scan, and stamps the measured single-electron waveform; the sum is the event signal. The model
+reproduces the characteristic \Fe{} charge spectrum (the 5.9~keV photopeak and the Ar escape peak at
+half the charge) from first principles, and is then used to study the pulse shape, the energy
+resolution, and their dependence on the conversion position and on the X-ray collimation. The tool is
+fast (a full 50-point position grid plus a $2\times10^{4}$-photon exposure runs in about one minute on a
+laptop) and is implemented in \texttt{tools/fe55\_mc.py}.
+\end{abstract}
+
+\tableofcontents
+
+\section{Introduction}
+The TGC is a multiwire proportional chamber run in a quasi-saturated mode: a plane of
+50~$\mu$m-diameter anode wires at 1.8~mm pitch sits midway between two
+grounded cathode planes 1.4~mm away on each side, filled with Ar/\co{} 70:30 at
+1900~V. An \Fe{} source emits Mn~K$\alpha$ X-rays at 5.9~keV, which photo-convert in the
+gas and drift to the nearest wire, where they avalanche.
+
+Characterizing the \emph{signal} — its shape, amplitude, and the resulting energy resolution — normally
+requires an event-by-event microscopic avalanche simulation, which is expensive. The key observation
+that makes a fast model possible is that the single-electron response \emph{factorizes}: a prior scan
+(Sec.~\ref{sec:method}) established that the peak-aligned, peak-normalized single-electron anode pulse
+shape $S(t')$ is \emph{position-independent}, while the electron drift delay and the avalanche gain are
+strongly position-dependent and can be tabulated. A real event is a linear superposition of
+single-electron responses, so the full signal can be assembled by summing the measured shape over a
+realistic set of primaries without any new field or avalanche computation.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Factorization and measured inputs}
+The simulation consumes three products of the position scan, all defined on the same half-pitch grid of
+transverse distance-from-wire $d$ and conversion depth $y$ (folded into one wire cell by the glide
+symmetry of the wire plane):
+\begin{itemize}
+  \item the canonical single-electron anode shape $S(t')$ (position-independent, pooled over all scan
+        positions; peak-normalized with the current spike at $t'=0$);
+  \item the drift-delay map $\bar\tau(d,y)$ and its event-to-event jitter $\sigma_\tau(d,y)$ (the latter
+        carries the single-electron longitudinal diffusion);
+  \item the per-position avalanche-gain distribution (the full Polya, including the finite probability
+        of zero gain from attachment), measured as the per-event avalanche size.
+\end{itemize}
+Figure~\ref{fig:shape} shows the measured single-electron response. The peak-aligned shapes overlay
+across positions (upper panels), confirming the position independence of $S(t')$ that the model relies
+on; the lower panels show that the electron drift time grows smoothly with depth and distance from the
+wire.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{waveform_shapes.png}
+  \caption{The \textbf{measured single-electron response} used as the model input (ion drift on).
+  Upper left: peak-aligned, peak-normalized anode pulses at the four corner positions, overlaying to a
+  common shape. Upper right: a zoom on the first 10~ns (spike plus the start of the ion
+  tail). Lower left: the ion-tail height across the cell. Lower right: the electron drift time to the
+  wire. The position-independence of the upper-panel shape is what licenses the superposition model.}
+  \label{fig:shape}
+\end{figure}
+
+\subsection{Signal synthesis}
+For an event with $N$ primary electrons, the induced anode current is built as
+\begin{equation}
+  W(t) \;=\; \sum_{i=1}^{N} g_i \, S\!\left(t-\tau_i\right),
+  \qquad
+  g_i \sim \mathrm{Gain}(d_i,y_i),
+  \qquad
+  \tau_i \sim \mathcal{N}\!\big(\bar\tau,\sigma_\tau\big)(d_i,y_i),
+  \label{eq:sum}
+\end{equation}
+\noindent where the symbols are, term by term:
+\begin{description}
+  \item[$W(t)$] the event's induced anode current --- the signal --- as a function of time $t$ measured
+        from the photon conversion. Its units are arbitrary (gain-electrons $\times$ the peak-normalized
+        shape); only its shape and relative amplitude are used.
+  \item[$N$, $i$] the number of primary ionization electrons the photon liberates, and the index
+        $i=1\dots N$ running over them. $N\approx E_\mathrm{dep}/W$ with a Fano fluctuation
+        (Sec.~\ref{sec:primary}): $N\approx227$ for a fully absorbed 5.9~keV photon and $N\approx113$
+        for an Ar-escape event.
+  \item[$g_i$] the avalanche gain of primary $i$ --- the number of electrons its avalanche collects ---
+        drawn \emph{independently} for each primary from the measured single-electron gain distribution
+        $\mathrm{Gain}(d_i,y_i)$ at that primary's position. That distribution is the per-cell Polya
+        measured by Garfield, including the finite probability of \emph{zero} gain (attachment of the
+        primary before it multiplies).
+  \item[$S(t')$] the measured, position-independent, peak-aligned and peak-normalized single-electron
+        anode pulse shape (Fig.~\ref{fig:shape}), with its current spike at $t'=0$. The term
+        $g_i\,S(t-\tau_i)$ is therefore primary $i$'s contribution: the universal single-electron pulse,
+        scaled by that primary's gain $g_i$ and shifted to its arrival time $\tau_i$.
+  \item[$\tau_i$] the drift time of primary $i$ from its creation point to the wire, sampled from a
+        Gaussian $\mathcal{N}(\bar\tau,\sigma_\tau)$ with the measured mean $\bar\tau(d_i,y_i)$ and width
+        $\sigma_\tau(d_i,y_i)$; $\bar\tau$ is the drift-time map and $\sigma_\tau$ its event-to-event
+        RMS, i.e.\ the single-electron longitudinal-diffusion jitter.
+  \item[$(d_i,y_i)$] the primary's position --- $d_i$ the transverse distance to the nearest wire and
+        $y_i$ the conversion depth --- folded by the glide symmetry of the wire plane into the single
+        measured half-pitch $\times$ depth cell on which the maps live. $\bar\tau$ and $\sigma_\tau$ are
+        bilinearly interpolated there, while $\mathrm{Gain}$ is taken from the nearest measured cell.
+\end{description}
+The sum is accumulated efficiently as one convolution of the per-primary charge-arrival profile
+$\sum_i g_i\,\delta(t-\tau_i)$ with $S$. Equation~\eqref{eq:sum} is exactly the ``unfolding'' of the
+production simulation, which instead fires one representative avalanche and scales the result by
+$N=\mathrm{round}(E/W)$; here the $N$ primaries are independent, each with its own position, arrival time
+and gain --- which is what produces the realistic pulse shape and its event-to-event fluctuations.
+
+\subsection{\Fe{} primary-charge generation}
+\label{sec:primary}
+The primary ionization is built microscopically, cluster by cluster, so that both the number of
+primaries $N$ and their spatial pattern fluctuate realistically. This is the step that supplies the set
+of primaries $\{(d_i,y_i)\}$ --- and hence $N$ --- consumed by Eq.~\eqref{eq:sum}.
+
+\paragraph{Photoabsorption.} An \Fe{} source emits mainly Mn~K$\alpha$ at $E_\gamma=5.895$~keV. Above the
+argon K-edge the photon is absorbed almost entirely on the Ar~K shell (binding energy $E_K=3.206$~keV;
+the \co{} and the argon L shells are negligible absorbers at this energy), ejecting a photoelectron of
+energy
+\begin{equation*}
+  E_\mathrm{pe} = E_\gamma - E_K \approx 2.69~\text{keV}.
+\end{equation*}
+The remaining $E_K$ stays momentarily as a K-shell vacancy, released as described below.
+
+\paragraph{Photoelectron track.} The photoelectron is emitted with the dipole angular distribution
+$\mathrm{d}N/\mathrm{d}\Omega \propto \sin^2\theta\,(1+\beta\cos\theta)$ relative to the incident-photon
+direction ($\beta=v/c\approx0.10$ at 2.69~keV, so the pattern is nearly $\sin^2\theta$ with a weak
+forward tilt) and ranges out over a short, tortuous track. Its practical range is parametrised as
+$R(E)=R_0\,(E/\text{keV})^{1.7}$ with $R_0\approx30~\mu$m, giving $R(2.69~\text{keV})\approx0.16$~mm at
+1~atm. The $n_\mathrm{pe}=E_\mathrm{pe}/W\approx103$ ionization electrons it creates ($W=26$~eV) are
+placed uniformly along the emission segment, each displaced by a Gaussian transverse straggling of width
+$\sigma_\mathrm{str}=f\,R$ ($f\approx0.3$). This gives the directional, finite-size charge blob of a real
+soft-X-ray conversion rather than a point.
+
+\paragraph{K-shell relaxation.} The Ar~K vacancy fills in one of two ways, chosen with the
+K-fluorescence yield $\omega_K\approx0.12$:
+\begin{itemize}
+  \item \emph{Auger} (probability $1-\omega_K\approx0.88$): the $E_K=3.206$~keV is released as an Auger
+        electron and its cascade, deposited locally as a second short track at the conversion point. The
+        event then carries the full 5.9~keV, giving $N=E_\gamma/W\approx227$ primaries --- the
+        \textbf{main (photopeak)} events.
+  \item \emph{Fluorescence} (probability $\omega_K\approx0.12$): an Ar~K$\alpha$ photon of
+        $E_{\mathrm{K}\alpha}=2.957$~keV is emitted isotropically and travels an exponentially
+        distributed distance (attenuation length $\approx2$~cm at this energy). Because the gap is only
+        $\sim$2.8~mm it usually \emph{escapes} the active volume: then only
+        $E_\mathrm{pe}+E_L\approx2.94$~keV is deposited --- where $E_L=E_K-E_{\mathrm{K}\alpha}\approx
+        0.249$~keV is the residual L-shell Auger left at the origin --- giving $N\approx113$, the
+        \textbf{Ar-escape} events at half the charge. If the fluorescence photon is instead re-absorbed
+        in the gas it lays down $E_{\mathrm{K}\alpha}$ as a displaced satellite cluster and the event
+        returns to the photopeak.
+\end{itemize}
+
+\paragraph{Fano fluctuation.} The electron count of every energetic deposit is sub-Poisson: each
+$n=E/W$ is fluctuated as $n\sim\mathcal{N}\!\big(E/W,\ \sqrt{F\,E/W}\big)$ with a Fano factor
+$F\approx0.2$, contributing an intrinsic $\sigma_E/E=\sqrt{F/N}$ per event (a few percent) on top of the
+avalanche (Polya) spread.
+
+\paragraph{Cloud, diffusion, and hand-off to Eq.~\eqref{eq:sum}.} The union of the photoelectron track,
+the Auger / L-Auger blobs and any fluorescence satellite is the primary-electron cloud. As it drifts,
+each electron additionally acquires a transverse Gaussian spread $\sigma_x=D\sqrt{y}$
+($D\approx120~\mu$m$/\sqrt{\text{cm}}$) before its $(d_i,y_i)$ is folded onto the maps; the longitudinal
+(arrival-time) diffusion is already carried by $\sigma_\tau$. Every primary then contributes
+$g_i\,S(t-\tau_i)$ exactly as in Eq.~\eqref{eq:sum}.
+
+\paragraph{Exposure geometries.} Two illuminations are modelled. In the \textbf{realistic full-cell}
+exposure the conversion depth follows the exponential X-ray absorption through the gap --- with
+$\lambda(5.9~\text{keV})\approx16$~cm~$\gg$~gap this is nearly uniform in depth --- while the transverse
+position is uniform over one wire pitch. In the \textbf{collimated} exposure the beam passes through a
+circular aperture, so the conversion footprint is a disk in the plane transverse to the beam, centred on
+a wire or between wires; its chord-weighted (semicircle) transverse profile concentrates conversions
+near the aperture centre.
+
+All numerical inputs above ($W$, $F$, $\omega_K$, the line and binding energies, $R_0$ and the range
+exponent, the straggling fraction $f$, the diffusion coefficient $D$, and the attenuation lengths) are
+set in \texttt{config/fe55\_mc.json}.
+
+\clearpage
+\section{Results}
+
+\subsection{Charge spectrum and validation}
+Figure~\ref{fig:spectrum} shows the collected-charge spectrum $Q=\sum_i g_i$ over the realistic
+exposure. The model reproduces the classic \Fe{}-in-argon double-peak structure with no tuning:
+\begin{itemize}
+  \item the \textbf{main-peak centroid} equals $N\langle g\rangle \approx 227\times31800 \approx
+        7.2\times10^{6}$ gain-electrons;
+  \item the \textbf{escape/main charge ratio} is $0.50$, matching the energy ratio
+        $2.94/5.9=0.498$;
+  \item the \textbf{escape fraction} is $\approx 9.5\%$, consistent with $\omega_K$ times the
+        geometric escape probability of the thin gap.
+\end{itemize}
+The energy resolution of the uniform exposure is $\sigma_E/E\approx19\%$. This is broader than a
+textbook proportional counter because it is dominated not by the Polya and Fano terms
+($\sqrt{(\sigma_g/\langle g\rangle)^2 + F}\,/\sqrt{N}\approx7\%$) but by the \emph{gain
+non-uniformity across the cell} sampled by a full-cell exposure — see Sec.~\ref{sec:res} and~\ref{sec:perpoint}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fe55_spectrum.png}
+  \caption{\textbf{\Fe{} charge spectrum} (realistic full-cell exposure, $2\times10^{4}$ photons). Grey:
+  all events; blue: full-energy (main) events; red: Ar-escape events. The top axis is self-calibrated by
+  setting the main-peak centroid to 5.9~keV.}
+  \label{fig:spectrum}
+\end{figure}
+
+\subsection{Pulse shape versus conversion position}
+Aligning each mean pulse to its own peak removes the drift-time offset and isolates the intrinsic shape.
+Figure~\ref{fig:waveforms} (left) shows that the shape depends on the \emph{transverse} position — sharp
+on-wire, broad in the mid-gap — but is essentially independent of depth (the shallow/deep curves
+overlay within each transverse position). Figure~\ref{fig:sweep} makes this explicit: sweeping the
+transverse position at fixed depth broadens the pulse monotonically from the wire to the mid-gap, while
+sweeping depth at fixed transverse position leaves the shape nearly unchanged.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_waveforms.png}
+  \caption{Left: mean \Fe{} pulse at the four corner positions, \textbf{peak-aligned}; on-wire pulses
+  are sharp, mid-gap pulses broad, and the shape is set by the transverse position, not the depth.
+  Right: realistic single-event pulses about their aligned mean.}
+  \label{fig:waveforms}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_sweep.png}
+  \caption{Aligned pulse shapes swept along one grid axis. Left: transverse sweep at fixed depth (color
+  = distance from wire) — the pulse broadens smoothly toward the mid-gap. Right: depth sweep at fixed
+  transverse position — the shape is nearly depth-independent.}
+  \label{fig:sweep}
+\end{figure}
+
+The timing and width observables across the full cell are mapped in Fig.~\ref{fig:grid} and the pulse
+FWHM in Fig.~\ref{fig:fwhm}. The peak time (drift time) grows from $\sim$1~ns
+(shallow, on-wire) to $\sim$24~ns (deep, mid-gap); the 10--90\% rise time spans
+1.1--7.1~ns and the FWHM 1.5--14.6~ns, both governed almost
+entirely by the distance from the wire.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_grid.png}
+  \caption{Pulse observables across the full (depth $\times$ distance-from-wire) grid: peak time (drift
+  timing), 10--90\% rise time, mean peak amplitude, and mean charge.}
+  \label{fig:grid}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.72\textwidth]{fe55_fwhm.png}
+  \caption{Pulse FWHM versus position: $\sim$1.5--3~ns across the near-wire region,
+  rising to $\sim$10--15~ns toward the mid-gap. The gradient is almost purely
+  transverse.}
+  \label{fig:fwhm}
+\end{figure}
+
+\clearpage
+\subsection{Single-event inspection}
+Figure~\ref{fig:single} shows individual events with their per-primary microstructure. On-wire, the
+$\sim$227 primary arrivals cluster into a narrow time window and sum to a sharp spike; in the mid-gap
+they spread over several nanoseconds, producing a broad, visibly lumpy pulse. Escape events are
+immediately recognizable by their $N\!\approx\!113$ primaries and roughly half the charge.
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_single.png}
+  \caption{Single \Fe{} events (rows: the four characteristic positions; columns: three events each).
+  Blue: induced current $W(t)$ at absolute time (real amplitude). Orange: the discrete per-primary
+  charge arrivals (gain versus arrival time) that build the pulse.}
+  \label{fig:single}
+\end{figure}
+
+\subsection{Energy resolution and collimation}
+\label{sec:res}
+Because the gain varies across the cell, the measured energy resolution depends on which part of the
+cell the source illuminates. Figure~\ref{fig:compare} compares the charge spectrum of the full-cell
+exposure with collimated exposures (a 1.8~mm-diameter circular aperture) centered on a
+wire and between wires. Collimating \emph{between wires} gives the best resolution, because the gain is
+flat and saturated in the mid-gap; collimating \emph{on a wire} is the worst, because it samples the
+steep near-wire gain gradient. The escape peak is unchanged, as expected for a transverse-independent
+process. The numbers are collected in Table~\ref{tab:summary}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fe55_spectrum_compare.png}
+  \caption{\textbf{Charge spectrum versus collimator position} (density-normalized). Between-wires
+  collimation gives the tightest main peak; on-wire the broadest; the full-cell exposure lies in
+  between.}
+  \label{fig:compare}
+\end{figure}
+
+\subsection{Pulse-height (peak-amplitude) spectra}
+A fast current readout measures the pulse height rather than the integrated charge. Because the peak
+amplitude depends on the pulse \emph{width} as well as the charge ($A\propto Q/\mathrm{width}$), and the
+width varies strongly across the cell, the pulse-height spectrum is far more position-smeared than the
+charge spectrum: $\sigma_E/E\approx38\%$ for the uniform exposure (Fig.~\ref{fig:amp}), versus $19\%$
+for charge. Under collimation the on-wire aperture is now the \emph{tighter} one (sharp pulses track the
+charge directly), the reverse of the charge case (Fig.~\ref{fig:ampcompare}). The practical conclusion
+is that, for this chamber, the integrated charge is a substantially better energy estimator than the
+peak pulse height.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fe55_amplitude.png}
+  \caption{\textbf{Pulse-height spectrum} (uniform exposure). The photopeak is broad and structured
+  because the peak amplitude folds in the position-dependent pulse width.}
+  \label{fig:amp}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fe55_amplitude_compare.png}
+  \caption{\textbf{Pulse-height spectrum versus collimator position}. On-wire (sharp pulses) is higher
+  and tighter; between-wires (broad pulses) is lower; opposite to the charge ordering.}
+  \label{fig:ampcompare}
+\end{figure}
+
+\clearpage
+\subsection{Per-position distributions}
+\label{sec:perpoint}
+Figures~\ref{fig:gridcharge} and~\ref{fig:gridamp} show the charge and pulse-height distributions at
+every one of the 50 grid points. At a \emph{fixed} position each main peak is sharp (a few percent),
+confirming that the broad full-cell spectra of Figs.~\ref{fig:spectrum} and~\ref{fig:amp} arise from
+mixing positions, not from an intrinsically poor single-position resolution. The per-point charge is
+highest on-wire at mid-depth ($\sim$10500k) and lowest at the on-wire-shallow ``notch''
+($\sim$3240k), where a primary born inside the avalanche region has little path to multiply; the
+peak amplitude peaks on-wire at mid-depth and falls monotonically toward the mid-gap.
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_grid_charge.png}
+  \caption{Per-point \textbf{charge} distributions (rows: depth; columns: distance from wire; shared
+  x-axis). Blue: main; red: escape. The main-peak centroid ($10^3$ gain-electrons) is annotated in each
+  panel.}
+  \label{fig:gridcharge}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=\textwidth]{fe55_grid_amplitude.png}
+  \caption{Per-point \textbf{pulse-height} distributions, same layout. The amplitude is highest on-wire
+  at mid-depth and decreases toward the mid-gap.}
+  \label{fig:gridamp}
+\end{figure}
+
+\clearpage
+\section{Summary}
+A fast, data-driven Monte Carlo reproduces \Fe{} signals in the TGC by superposing the measured
+single-electron response over a realistic primary-electron cloud. It validates against the known \Fe{}
+spectrum (photopeak plus Ar escape at half the charge, correct centroid and escape fraction) and yields
+the following picture of the chamber's signal:
+\begin{itemize}
+  \item the \textbf{pulse shape} is set by the transverse distance from the wire (sharp on-wire, broad
+        mid-gap) and is nearly independent of depth, which only sets the drift delay;
+  \item the \textbf{energy resolution} from integrated charge is $\approx19\%$ for a full-cell
+        exposure, improving to $\approx17\%$ when collimated between wires and degrading to $\approx20\%$
+        on a wire; at a fixed position it is intrinsically a few percent, so the spread is dominated by
+        gain non-uniformity across the cell;
+  \item the \textbf{peak pulse height} is a markedly poorer energy estimator ($\approx38\%$) than the
+        integrated charge, because it also folds in the position-dependent pulse width.
+\end{itemize}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Main-peak centroid and resolution of the \Fe{} photopeak for the three exposures, for the
+  integrated charge and the peak amplitude. Charge in $10^3$ gain-electrons, amplitude in $10^6$
+  arbitrary current units.}
+  \label{tab:summary}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{Charge} & \multicolumn{2}{c}{Peak amplitude} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    Exposure & centroid & $\sigma_E/E$ & centroid & $\sigma_E/E$ \\
+    \midrule
+    Full-cell uniform        & 7220 & 19\% & 1.96 & 38\% \\
+    Collimated, on-wire      & 7380 & 20\% & 2.12 & 35\% \\
+    Collimated, between wires & 7020 & 17\% & 1.80 & 38\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\appendix
+\section{Reproducing the figures}
+All figures are produced by \texttt{tools/fe55\_mc.py} (pure Python; the maps come from the committed
+position-scan products) into \texttt{results/fe55\_mc/}:
+{\footnotesize
+\begin{verbatim}
+# position maps: charge spectrum, pulse shapes, observable maps, per-point distributions
+python3 tools/fe55_mc.py --scan-grid --seed 1
+# collimator study: charge + pulse-height, on-wire vs between-wires
+python3 tools/fe55_mc.py --mode realistic --collimator 1.8 \
+        --collimator-center both --seed 1
+# single-event inspection
+python3 tools/fe55_mc.py --inspect --seed 1
+\end{verbatim}
+}
+See Section~14 of the TGC simulation manual (\texttt{docs/manual.md}) for the model details and the full
+list of command-line options.
+
+\end{document}
