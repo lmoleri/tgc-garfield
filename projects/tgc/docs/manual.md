@@ -25,7 +25,8 @@ number, so the references survive edits — open `src/tgc_sim.cc` and search.
 11. [The GUI](#11-the-gui)
 12. [Numerical subtleties](#12-numerical-subtleties-consolidated)
 13. [Building, running & extending](#13-building-running--extending)
-14. [References](#14-references)
+14. [The 55Fe Monte Carlo (data-driven response)](#14-the-55fe-monte-carlo-data-driven-response)
+15. [References](#15-references)
 
 ---
 
@@ -504,7 +505,73 @@ instantly.
 
 ---
 
-## 14. References
+## 14. The 55Fe Monte Carlo (data-driven response)
+
+`tools/fe55_mc.py` synthesizes **full detector pulses and the 55Fe charge spectrum** from the
+*measured* single-electron response, with **no further Garfield runs**. It is the unfolding of the
+approximation in `RunDistancePoint`, which fires one avalanche and scales by `nPrimary = round(E/W)`
+(§7): instead, it sums the measured single-electron waveform over a realistic cloud of primary
+electrons, each with its own drift delay and avalanche gain.
+
+**The factorization** (established by the position scan, §7 tooling `tools/gain_scan.py`): the
+peak-aligned, peak-normalized single-electron anode shape `$S(t')$` is **position-independent**, while
+the **drift delay** `$\tau(x,y)$` (and its jitter `$\sigma_\tau$`) and the **gain distribution**
+`Gain(x,y)` (per-position Polya, including the zero-gain attachment fraction) are position-dependent and
+already mapped. A real pulse is therefore a superposition:
+
+```math
+W(t) = \sum_{i=1}^{N} g_i\, S(t - \tau_i), \qquad
+g_i \sim \mathrm{Gain}(x_i,y_i), \quad \tau_i \sim \mathcal{N}\!\big(\bar\tau,\sigma_\tau\big)(x_i,y_i)
+```
+
+with `N ≈ E/W ≈ 227` primaries for a 5.9 keV deposit.
+
+**55Fe model** (Kα + Ar-escape; photoelectron track + Auger cloud). A 5.9 keV Mn Kα photon
+photo-absorbs on the Ar K-shell (`Eb = 3.206 keV`), ejecting a **photoelectron** of 2.69 keV that
+ionizes along a short range-length track (dipole emission, practical range `R(E)`, transverse
+straggling). The K-vacancy relaxes by either an **Auger** electron (≈88%, deposits `Eb` locally → full
+5.9 keV, *main peak*) or **Ar Kα fluorescence** (≈12%, a 2.96 keV photon): in the thin gap it usually
+**escapes** (→ 2.94 keV deposited, *escape peak*) or occasionally reabsorbs as a displaced satellite
+cluster. Each cluster's electron count carries a Fano fluctuation. Every primary then drifts — its
+`$(x,y)$` folded into the measured half-pitch × depth region by the wire-plane symmetry, delay and gain
+interpolated/sampled from the maps — and stamps `$S$`.
+
+**Inputs** (scan products; nothing re-simulated):
+- `--shape-dir` (default `results/scan_waveform_halfpitch`) → `$S(t')$` (`waveform_shapes.csv`, pooled
+  over positions) and the drift map (`waveform_drift.csv`: `mean_drift_ns`, `rms_drift_ns`).
+- `--gain-dir` (default `results/gain_scan_halfpitch`) → per-position empirical gain, read from the
+  `avalanche_size` branch of each `tgc_sim.root` (high-stats, ion-off gain scan).
+
+**Run:**
+
+```bash
+python3 tools/fe55_mc.py                       # both modes, defaults from config/fe55_mc.json
+python3 tools/fe55_mc.py --n-photons 50000 --seed 2 --gain polya --mode realistic
+python3 tools/fe55_mc.py --scan-grid           # scan every map grid point -> observable maps
+```
+
+All physics knobs live in `config/fe55_mc.json` (W-value, Fano, attenuation lengths, fluorescence
+yield, track range/straggle, diffusion, the conversion-point scan list); CLI flags
+`--n-photons/--seed/--tcut/--gain/--mode` override the run block, and `--scan-grid` replaces the
+config's `scan_points` with every measured (depth, x) grid point. It is light (pure Python; ≈30k
+photons in ~13 s; the 50-point grid in ~1 min), so no cluster is needed.
+
+**Outputs** (`--out results/fe55_mc`): `fe55_spectrum.{png,csv}` (main + Ar-escape peaks, self-calibrated
+energy axis, σ_E/E), `fe55_waveforms.png` (peak-aligned mean pulse vs conversion position +
+realistic-exposure pulses), `fe55_observables.csv` (peak/rise time, FWHM, amplitude, charge vs position),
+and with `--scan-grid` a `fe55_grid.png` of those observables mapped across the full cell, a
+`fe55_fwhm.png` map of the pulse FWHM vs position, plus a `fe55_sweep.png` of the aligned pulse shapes
+swept in transverse position (fixed depth) and in depth (fixed transverse position).
+
+**Built-in validation** (printed each run): main-peak centroid `≈ N·⟨g⟩`; escape/main charge ratio
+`≈ 2.94/5.9 ≈ 0.50`; escape fraction `≈ ω_K·P(escape)`; peak time grows with conversion depth and the
+rise sharpens on-wire (primaries converge at the wire) versus mid-gap (cloud spans a range of drift
+times). The spectrum width is dominated by the measured gain non-uniformity across the cell (notably
+the near-wire low-gain layer), not by Polya + Fano alone.
+
+---
+
+## 15. References
 
 - **Garfield++** — H. Schindler & R. Veenhof, simulation of particle detectors,
   <https://garfieldpp.web.cern.ch/>. Classes used here: `MediumMagboltz`, `ComponentAnalyticField`,
