@@ -95,6 +95,19 @@ def _sig_diffs(a: dict, b: dict):
     return out
 
 
+def _gain_stats(gain_dir):
+    """Minimum measured events/cell in the gain maps, from gain_map.csv; None if absent
+    (the pooled n_events column written by gain_scan.py). Used to gate MC runs on stats."""
+    import pandas as pd
+    f = Path(gain_dir) / "gain_map.csv"
+    if not f.exists():
+        return None
+    try:
+        return int(pd.read_csv(f)["n_events"].min())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ───────────────────────────── background runner ───────────────────────────
 
 class MCRunner(QThread):
@@ -651,6 +664,11 @@ class Fe55MCPanel(QWidget):
         self.n_photons.setValue(20000); self.n_photons.setSingleStep(1000)
         self.seed = QSpinBox(); self.seed.setRange(0, 1_000_000); self.seed.setValue(1)
         self.gain = QComboBox(); self.gain.addItems(["empirical", "polya"])
+        self.g_stats = QSpinBox(); self.g_stats.setRange(10, 100000); self.g_stats.setValue(1000)
+        self.g_stats.setSingleStep(100)
+        self.g_stats.setToolTip("Required measured events per cell in the gain (avalanche_size) "
+                                "distribution. A run prompts to produce more via Garfield when the "
+                                "maps are below this (or missing).")
         self.coll_d = QDoubleSpinBox(); self.coll_d.setRange(0.1, 10.0)
         self.coll_d.setValue(1.8); self.coll_d.setSingleStep(0.1); self.coll_d.setSuffix(" mm")
         self.coll_center = QComboBox(); self.coll_center.addItems(["both", "wire", "gap"])
@@ -686,6 +704,7 @@ class Fe55MCPanel(QWidget):
         form.addRow("Photons (per point for grid)", self.n_photons)
         form.addRow("Seed", self.seed)
         form.addRow("Gain model", self.gain)
+        form.addRow("Gain stats (events/cell)", self.g_stats)
         form.addRow("Collimator diameter", self.coll_d)
         form.addRow("Collimator center", self.coll_center)
         form.addRow("Events/position (single)", self.inspect_events)
@@ -778,6 +797,7 @@ class Fe55MCPanel(QWidget):
     def _require_data(self, study, params):
         """True = ok to run the MC; otherwise shows an error box (maybe launching a scan)."""
         gain_dir, shape_dir = Path(params["gain_dir"]), Path(params["shape_dir"])
+        stats = int(params.get("stats", 1000))
         miss = []
         if not (shape_dir / "waveform_drift.csv").exists() \
                 or not (shape_dir / "waveform_shapes.csv").exists():
@@ -786,7 +806,7 @@ class Fe55MCPanel(QWidget):
             miss.append(f"{gain_dir}  (gain avalanche-size roots)")
         if miss:
             return self._prompt_generate("No Garfield map data found in:\n  " + "\n  ".join(miss),
-                                         None, None, allow_proceed=False)
+                                         None, None, allow_proceed=False, n_gain_default=stats)
         # detector-config match
         if self.config_panel is not None:
             try:
@@ -798,7 +818,15 @@ class Fe55MCPanel(QWidget):
                 txt = ("The maps were generated for a DIFFERENT detector configuration:\n"
                        + "\n".join(f"  {k}: config={a}  vs  maps={b}"
                                    for k, a, b in _sig_diffs(cur, msig)))
-                return self._prompt_generate(txt, None, None, allow_proceed=False)
+                return self._prompt_generate(txt, None, None, allow_proceed=False, n_gain_default=stats)
+        # gain-distribution stats (every study samples the per-cell avalanche-size Polya)
+        have = _gain_stats(gain_dir)
+        if have is not None and have < stats:
+            txt = (f"The measured gain distribution has only {have} events/cell, below the requested "
+                   f"{stats}. Produce more (Garfield, pooled incrementally into the existing maps) or "
+                   f"use what's available.")
+            if not self._prompt_generate(txt, None, None, allow_proceed=True, n_gain_default=stats):
+                return False
         # grid coverage (grid study with custom points)
         if study == "grid":
             g = params["grid"]
@@ -818,29 +846,29 @@ class Fe55MCPanel(QWidget):
                 txt = (f"{len(missing)} of {len(depths) * len(dreq)} requested grid points are NOT "
                        f"measured. They would be interpolated (drift/timing) and taken from the "
                        f"nearest measured cell (gain).")
-                return self._prompt_generate(txt, ydep, xpos, allow_proceed=True)
+                return self._prompt_generate(txt, ydep, xpos, allow_proceed=True, n_gain_default=stats)
         return True
 
-    def _prompt_generate(self, message, depths, xpos, allow_proceed):
+    def _prompt_generate(self, message, depths, xpos, allow_proceed, n_gain_default=100):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Missing MC data for this configuration")
         box.setText(message)
         gen = box.addButton("Run Garfield…", QMessageBox.AcceptRole)
-        proc = (box.addButton("Proceed anyway", QMessageBox.DestructiveRole)
+        proc = (box.addButton("Use what's available", QMessageBox.DestructiveRole)
                 if allow_proceed else None)
         box.addButton("Cancel", QMessageBox.RejectRole)
         box.exec_()
         clicked = box.clickedButton()
         if clicked is gen:
-            self._open_generate_dialog(depths, xpos)
+            self._open_generate_dialog(depths, xpos, n_gain_default)
             return False
         if proc is not None and clicked is proc:
-            self._log_cb("[MC] proceeding with interpolation/clamping for unmeasured points.")
+            self._log_cb("[MC] proceeding with the available (interpolated / lower-stat) maps.")
             return True
         return False
 
-    def _open_generate_dialog(self, depths, xpos):
+    def _open_generate_dialog(self, depths, xpos, n_gain_default=100):
         if self.config_panel is None:
             QMessageBox.critical(self, "No detector config",
                                  "The detector configuration panel is not available to this tab.")
@@ -856,7 +884,7 @@ class Fe55MCPanel(QWidget):
                       f"gas/voltage also regenerates the Magboltz table (one-time, slow). Results "
                       f"accumulate incrementally, so partial runs aren't wasted.")
         warn.setWordWrap(True); form.addRow(warn)
-        n_gain = QSpinBox(); n_gain.setRange(1, 5000); n_gain.setValue(100)
+        n_gain = QSpinBox(); n_gain.setRange(1, 100000); n_gain.setValue(int(n_gain_default))
         n_wf = QSpinBox(); n_wf.setRange(1, 2000); n_wf.setValue(30)
         jobs = QSpinBox(); jobs.setRange(1, 64); jobs.setValue(min(8, max(1, len(depths))))
         form.addRow("Gain events / point", n_gain)
@@ -900,7 +928,7 @@ class Fe55MCPanel(QWidget):
         return dict(n_photons=self.n_photons.value(), seed=self.seed.value(),
                     gain=self.gain.currentText(), collimator=self.coll_d.value(),
                     collimator_center=self.coll_center.currentText(),
-                    inspect_events=self.inspect_events.value(),
+                    inspect_events=self.inspect_events.value(), stats=self.g_stats.value(),
                     grid=dict(ndepth=self.g_ndepth.value(), ndist=self.g_ndist.value(),
                               dmin=dmin, dmax=dmax, xmin=xmin, xmax=xmax),
                     shape_dir=self.shape_dir.text(), gain_dir=self.gain_dir.text(),

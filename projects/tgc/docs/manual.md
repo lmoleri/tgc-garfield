@@ -451,7 +451,9 @@ point, the drift-time map, and the single-electron shape — and shows the confi
 
 To keep results meaningful, a run is **validated** against the data it needs: the maps must exist, the
 detector config (geometry/gas/voltage from the left ConfigPanel) must match the maps' `run_config.json`
-signature, and the requested grid points must be measured. If anything is missing or mismatched an
+signature, the gain distribution must have at least the settable **gain stats** (events/cell, default
+1000; the committed maps have 100), and the requested grid points must be measured. If anything is
+missing, mismatched, or under-stat an
 **error box** names the problem and offers to **run the Garfield simulation** — a background
 `GarfieldScanRunner` that builds temp scan configs from the current detector config + the requested
 grid and drives `gain_scan.py` (gain + waveform scans via `tgc_sim`) into the map dirs, with a time
