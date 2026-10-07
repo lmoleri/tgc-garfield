@@ -564,8 +564,10 @@ position-smeared since amplitude depends on pulse width as well as charge. `fe55
 energy axis, σ_E/E), `fe55_waveforms.png` (peak-aligned mean pulse vs conversion position +
 realistic-exposure pulses), `fe55_observables.csv` (peak/rise time, FWHM, amplitude, charge vs position),
 and with `--scan-grid` a `fe55_grid.png` of those observables mapped across the full cell, a
-`fe55_fwhm.png` map of the pulse FWHM vs position, plus a `fe55_sweep.png` of the aligned pulse shapes
-swept in transverse position (fixed depth) and in depth (fixed transverse position). `--inspect` instead
+`fe55_fwhm.png` map of the pulse FWHM vs position, a `fe55_sweep.png` of the aligned pulse shapes
+swept in transverse position (fixed depth) and in depth (fixed transverse position), and
+`fe55_grid_charge.png` / `fe55_grid_amplitude.png` — small-multiples matrices (depth × distance-from-wire)
+of the per-point charge and pulse-height distributions. `--inspect` instead
 writes `fe55_single.png`: a grid of individual event pulses (absolute time, real amplitude) overlaid
 with the per-primary charge-arrival microstructure (gain vs arrival time) at the four characteristic
 positions. `--collimator D_mm` (optionally `--collimator-center {wire,gap,both}`) restricts the

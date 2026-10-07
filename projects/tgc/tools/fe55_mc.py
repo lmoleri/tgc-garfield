@@ -425,9 +425,9 @@ def realistic_convs(n, phys, rng, collimator=None):
 # Plotted per-photon quantity: (res key, scale, x-axis label, title word, centroid-unit).
 _QUANTITY = {
     "charge":    ("Q",   1e3, r"collected charge  $Q=\sum_i g_i$  [$10^3$ gain-electrons]",
-                  "charge spectrum", "k"),
+                  "charge spectrum", "k", ".0f"),
     "amplitude": ("amp", 1e6, r"peak amplitude  $\max_t\,i(t)$  [$10^6$ arb.]",
-                  "pulse-height spectrum", "M"),
+                  "pulse-height spectrum", "M", ".2f"),
 }
 
 
@@ -435,7 +435,7 @@ def _plot_spectrum(res, out, phys, quantity="charge", fname="fe55_spectrum", tit
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    key, scale, xlabel, titleword, unit = _QUANTITY[quantity]
+    key, scale, xlabel, titleword, unit, cfmt = _QUANTITY[quantity]
     V = res[key] / scale
     tr = res["truth"]
     main, esc = V[tr == "main"], V[tr == "escape"]
@@ -448,11 +448,11 @@ def _plot_spectrum(res, out, phys, quantity="charge", fname="fe55_spectrum", tit
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.hist(V, bins=bins, color="0.6", label=f"all (N={len(V)})")
     ax.hist(main, bins=bins, histtype="step", color="C0", lw=1.6,
-            label=f"main 5.9 keV (centroid={cen_main:.0f}{unit}, "
+            label=f"main 5.9 keV (centroid={cen_main:{cfmt}}{unit}, "
                   rf"$\sigma/E$={sig_main*100:.1f}%)")
     if len(esc):
         ax.hist(esc, bins=bins, histtype="step", color="C3", lw=1.6,
-                label=f"Ar escape (centroid={cen_esc:.0f}{unit}, "
+                label=f"Ar escape (centroid={cen_esc:{cfmt}}{unit}, "
                       f"esc/main={cen_esc/cen_main:.2f})")
     ax.axvline(cen_main, color="C0", ls=":", lw=1)
     if len(esc):
@@ -485,7 +485,7 @@ def _plot_spectrum_compare(results, specs, labels, out, phys, quantity="charge",
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    key, scale, xlabel, titleword, unit = _QUANTITY[quantity]
+    key, scale, xlabel, titleword, unit, cfmt = _QUANTITY[quantity]
     Vs = [res[key] / scale for res in results]
     hi = max(np.percentile(V, 99.5) for V in Vs) * 1.1
     bins = np.linspace(0, hi, 120)
@@ -494,7 +494,7 @@ def _plot_spectrum_compare(results, specs, labels, out, phys, quantity="charge",
     fig, ax = plt.subplots(figsize=(8.5, 5))
     for V, sp, lab, c in zip(Vs, specs, labels, colors):
         ax.hist(V, bins=bins, density=True, histtype="step", color=c, lw=1.7,
-                label=f"{lab}: main={sp['centroid_main']:.0f}{unit}, "
+                label=f"{lab}: main={sp['centroid_main']:{cfmt}}{unit}, "
                       rf"$\sigma/E$={sp['sigma_over_main']*100:.1f}%, "
                       f"x{sp['centroid_main']/cen0:.2f}")
         ax.axvline(sp["centroid_main"], color=c, ls=":", lw=1)
@@ -565,6 +565,58 @@ def _plot_grid(meta, scan_res, out, wires):
     fig.suptitle("55Fe pulse observables across the full grid", y=1.0)
     fig.tight_layout()
     fig.savefig(out / "fe55_grid.png", dpi=130)
+
+
+def _plot_grid_dists(meta, scan_res, out, quantity):
+    """Small-multiples matrix (rows = depth, cols = distance from wire) of the per-point
+    distribution of a per-event quantity (charge or peak amplitude), with the main/escape
+    split, on a shared x-axis -> shows how each distribution shifts/narrows across the cell."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    key, scale, xlabel, titleword, unit, cfmt = _QUANTITY[quantity]
+    ys_u = sorted({m["depth_mm"] for m in meta.values()})
+    ds_u = sorted({m["d_wire_mm"] for m in meta.values()})
+    at, allv = {}, []
+    for name, m in meta.items():
+        r = scan_res[name]
+        if not r["n"]:
+            continue
+        v = r[key] / scale
+        at[(round(m["depth_mm"], 4), round(m["d_wire_mm"], 4))] = (v, r["truth"])
+        allv.append(v)
+    if not allv:
+        return
+    hi = float(np.percentile(np.concatenate(allv), 99.5)) * 1.05
+    bins = np.linspace(0, hi, 60)
+    nrow, ncol = len(ys_u), len(ds_u)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(1.55 * ncol, 1.5 * nrow),
+                             squeeze=False, sharex=True)
+    for i, yv in enumerate(ys_u):
+        for j, dv in enumerate(ds_u):
+            ax = axes[i][j]
+            hit = at.get((round(yv, 4), round(dv, 4)))
+            if hit is None:
+                ax.axis("off"); continue
+            v, tr = hit
+            ax.hist(v, bins=bins, color="0.7")
+            ax.hist(v[tr == "main"], bins=bins, histtype="step", color="C0", lw=0.8)
+            if (tr == "escape").any():
+                ax.hist(v[tr == "escape"], bins=bins, histtype="step", color="C3", lw=0.8)
+            cen = float(np.mean(v[tr == "main"])) if (tr == "main").any() else float("nan")
+            ax.axvline(cen, color="C0", ls=":", lw=0.6)
+            ax.text(0.95, 0.92, f"{cen:{cfmt}}{unit}", transform=ax.transAxes,
+                    ha="right", va="top", fontsize=5)
+            ax.set_xlim(0, hi); ax.set_yticks([]); ax.tick_params(labelsize=5)
+            if j == 0:
+                ax.set_ylabel(f"y={yv:g}mm", fontsize=6)
+            if i == 0:
+                ax.set_title(f"d={dv:g}mm", fontsize=6)
+    fig.supxlabel(xlabel, fontsize=9)
+    fig.suptitle(f"55Fe per-point {titleword}s across the grid  "
+                 f"(rows = depth, cols = distance from wire; blue = main, red = escape)", y=1.0)
+    fig.tight_layout()
+    fig.savefig(out / f"fe55_grid_{quantity}.png", dpi=130)
 
 
 def _plot_fwhm(meta, scan_res, out):
@@ -789,7 +841,7 @@ def main() -> int:
                 exposures.append((f"collimated {args.collimator:g}mm on-{ctr}", f"collim_{ctr}", cres))
         # charge spectrum AND peak-amplitude (pulse-height) spectrum for every exposure
         for quantity, qtag in (("charge", "spectrum"), ("amplitude", "amplitude")):
-            unit = _QUANTITY[quantity][4]
+            unit, cfmt = _QUANTITY[quantity][4], _QUANTITY[quantity][5]
             specs = []
             for label, tag, res in exposures:
                 fname = f"fe55_{qtag}" + (f"_{tag}" if tag else "")
@@ -801,11 +853,11 @@ def main() -> int:
                                        out, phys, quantity=quantity, fname=f"fe55_{qtag}_compare")
                 outputs.append(f"fe55_{qtag}_compare.png")
             u = specs[0]
-            print(f"  {quantity} (uniform): N={incl_res['n']}  main={u['centroid_main']:.3g}{unit}  "
+            print(f"  {quantity} (uniform): N={incl_res['n']}  main={u['centroid_main']:{cfmt}}{unit}  "
                   f"esc/main={u['escape_over_main']:.2f}  sigma/E={u['sigma_over_main']*100:.1f}%  "
                   f"esc-frac={u['escape_fraction']*100:.1f}%")
             for (label, _, _), sp in zip(exposures[1:], specs[1:]):
-                print(f"  {quantity} ({label}): main={sp['centroid_main']:.3g}{unit}  "
+                print(f"  {quantity} ({label}): main={sp['centroid_main']:{cfmt}}{unit}  "
                       f"sigma/E={sp['sigma_over_main']*100:.1f}%  "
                       f"ratio={sp['centroid_main']/u['centroid_main']:.3f}")
 
@@ -813,6 +865,8 @@ def main() -> int:
         _plot_grid(scan_meta, scan_res, out, wires); outputs.append("fe55_grid.png")
         _plot_fwhm(scan_meta, scan_res, out); outputs.append("fe55_fwhm.png")
         _plot_sweep(scan_meta, scan_res, out); outputs.append("fe55_sweep.png")
+        _plot_grid_dists(scan_meta, scan_res, out, "charge"); outputs.append("fe55_grid_charge.png")
+        _plot_grid_dists(scan_meta, scan_res, out, "amplitude"); outputs.append("fe55_grid_amplitude.png")
         ys_u = sorted({m["depth_mm"] for m in scan_meta.values()})
         ds_u = sorted({m["d_wire_mm"] for m in scan_meta.values()})
         overlay = {}                                     # 4 corners -> readable shape overlay
