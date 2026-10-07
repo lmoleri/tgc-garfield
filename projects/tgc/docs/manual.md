@@ -548,6 +548,7 @@ interpolated/sampled from the maps — and stamps `$S$`.
 python3 tools/fe55_mc.py                       # both modes, defaults from config/fe55_mc.json
 python3 tools/fe55_mc.py --n-photons 50000 --seed 2 --gain polya --mode realistic
 python3 tools/fe55_mc.py --scan-grid           # scan every map grid point -> observable maps
+python3 tools/fe55_mc.py --inspect             # individual event pulses + per-primary microstructure
 ```
 
 All physics knobs live in `config/fe55_mc.json` (W-value, Fano, attenuation lengths, fluorescence
@@ -561,7 +562,10 @@ energy axis, σ_E/E), `fe55_waveforms.png` (peak-aligned mean pulse vs conversio
 realistic-exposure pulses), `fe55_observables.csv` (peak/rise time, FWHM, amplitude, charge vs position),
 and with `--scan-grid` a `fe55_grid.png` of those observables mapped across the full cell, a
 `fe55_fwhm.png` map of the pulse FWHM vs position, plus a `fe55_sweep.png` of the aligned pulse shapes
-swept in transverse position (fixed depth) and in depth (fixed transverse position).
+swept in transverse position (fixed depth) and in depth (fixed transverse position). `--inspect` instead
+writes `fe55_single.png`: a grid of individual event pulses (absolute time, real amplitude) overlaid
+with the per-primary charge-arrival microstructure (gain vs arrival time) at the four characteristic
+positions.
 
 **Built-in validation** (printed each run): main-peak centroid `≈ N·⟨g⟩`; escape/main charge ratio
 `≈ 2.94/5.9 ≈ 0.50`; escape fraction `≈ ω_K·P(escape)`; peak time grows with conversion depth and the

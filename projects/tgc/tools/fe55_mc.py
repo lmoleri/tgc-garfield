@@ -326,9 +326,11 @@ def _fwhm_ns(t, y):
     return edge(1) - edge(-1)
 
 
-def simulate(convs, phys, maps, S, ipk, T, dt, gain_mode, rng, keep_samples=0):
+def simulate(convs, phys, maps, S, ipk, T, dt, gain_mode, rng, keep_samples=0, keep_records=0):
     """Transport+sum for a list of conversion points (each (x,y,z,E_eV)).
-    Returns dict with sum_W, n, sample waveforms, and per-photon observable arrays."""
+    Returns dict with sum_W, n, sample waveforms, and per-photon observable arrays.
+    With keep_records>0, also retains rich per-event records (W + per-primary taus/g +
+    conv + truth) for the single-waveform inspection view."""
     ys, ds, tau, rms = maps["ys"], maps["ds"], maps["tau"], maps["rms"]
     cells, gmean, grms = maps["cells"], maps["gmean"], maps["grms"]
     wires, gap = maps["wires"], phys["gap_cm"]
@@ -342,7 +344,7 @@ def simulate(convs, phys, maps, S, ipk, T, dt, gain_mode, rng, keep_samples=0):
     alen = n_pre + n_post + 1
     t_rel = (np.arange(alen) - n_pre) * dt
     al_sum, al_wt = np.zeros(alen), np.zeros(alen)
-    samples, Q, amp, tpeak, rise, truth = [], [], [], [], [], []
+    samples, records, Q, amp, tpeak, rise, truth = [], [], [], [], [], [], []
     for conv in convs:
         pos, tr = generate_electrons(conv, phys, rng)
         if len(pos) == 0:
@@ -379,8 +381,11 @@ def simulate(convs, phys, maps, S, ipk, T, dt, gain_mode, rng, keep_samples=0):
         truth.append(tr)
         if len(samples) < keep_samples:
             samples.append(W.copy())
+        if keep_records and len(records) < keep_records and wp > 0:
+            records.append({"W": W.copy(), "taus": taus.copy(), "g": g.copy(),
+                            "conv": conv, "truth": tr})
     aligned_mean = np.divide(al_sum, al_wt, out=np.full(alen, np.nan), where=al_wt > 0)
-    return {"sum_W": sum_W, "n": len(Q), "samples": samples,
+    return {"sum_W": sum_W, "n": len(Q), "samples": samples, "records": records,
             "aligned_mean": aligned_mean, "t_rel": t_rel,
             "Q": np.array(Q), "amp": np.array(amp), "tpeak": np.array(tpeak),
             "rise": np.array(rise), "truth": np.array(truth)}
@@ -541,6 +546,52 @@ def _plot_fwhm(meta, scan_res, out):
     fig.savefig(out / "fe55_fwhm.png", dpi=130)
 
 
+def _plot_single(records_by_pos, out, T):
+    """Small-multiples grid of individual 55Fe pulses (absolute time, real amplitude)
+    with the per-primary charge-arrival microstructure (gain vs arrival time)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    positions = [p for p in records_by_pos if records_by_pos[p]]
+    ncol = max((len(records_by_pos[p]) for p in positions), default=0)
+    if not positions or ncol == 0:
+        print("warning: no events to inspect", file=sys.stderr)
+        return
+    nrow = len(positions)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 3.1 * nrow), squeeze=False)
+    for i, pos in enumerate(positions):
+        recs = records_by_pos[pos]
+        for j in range(ncol):
+            ax = axes[i][j]
+            if j >= len(recs):
+                ax.axis("off"); continue
+            rec = recs[j]
+            W, taus, g, conv, tr = rec["W"], rec["taus"], rec["g"], rec["conv"], rec["truth"]
+            tp = T[int(np.argmax(W))]
+            ax.plot(T, W, color="C0", lw=1.4, zorder=3)
+            ax.axhline(0, color="k", lw=0.5)
+            axr = ax.twinx()                                  # per-primary microstructure
+            axr.vlines(taus, 0, g, color="C1", lw=0.5, alpha=0.35, zorder=1)
+            axr.scatter(taus, g, s=6, color="C1", alpha=0.5, zorder=2, edgecolors="none")
+            axr.set_ylim(bottom=0); axr.tick_params(axis="y", labelcolor="C1", labelsize=7)
+            if j == ncol - 1:
+                axr.set_ylabel(r"primary gain $g_i$", color="C1", fontsize=8)
+            depth_mm = -conv[1] * 10.0
+            txt = (f"{pos}\nx={conv[0]*10:.2g} mm, y={depth_mm:.2g} mm\n"
+                   f"N={len(g)}, Q={g.sum()/1e3:.0f}k\n{tr}, pk={tp:.1f} ns, "
+                   f"FWHM={_fwhm_ns(T, W):.1f} ns")
+            ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top", fontsize=7,
+                    bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.85), zorder=4)
+            ax.set_xlim(max(T[0], tp - 8), tp + 45)
+            ax.set_ylabel("induced current [arb.]", fontsize=8)
+            if i == nrow - 1:
+                ax.set_xlabel("time [ns]", fontsize=8)
+            ax.tick_params(labelsize=7)
+    fig.suptitle("55Fe single-event pulses + per-primary microstructure", y=1.0)
+    fig.tight_layout()
+    fig.savefig(out / "fe55_single.png", dpi=130)
+
+
 def _plot_sweep(meta, scan_res, out):
     """Aligned pulse shapes swept along one grid axis at a time: transverse (fixed
     depth) shows the broadening toward mid-gap; depth (fixed transverse) shows the
@@ -598,6 +649,11 @@ def main() -> int:
     ap.add_argument("--scan-grid", action="store_true",
                     help="scan every (depth, x) point of the measured map grid (-> observable "
                          "maps fe55_grid.png) instead of the config's scan_points")
+    ap.add_argument("--inspect", action="store_true",
+                    help="produce fe55_single.png: individual event pulses + per-primary "
+                         "microstructure at the config's scan_points (standalone, fast)")
+    ap.add_argument("--inspect-events", type=int, default=3,
+                    help="events per position for --inspect (default 3)")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -629,6 +685,20 @@ def main() -> int:
     maps = {"ys": ys, "ds": ds, "tau": tau, "rms": rms,
             "cells": cells, "gmean": gmean, "grms": grms, "wires": wires}
     T = np.arange(-10.0, float(np.nanmax(tau)) + tcut + 15.0 + dt, dt)
+
+    if args.inspect:                                     # standalone single-event inspection
+        nkeep = max(1, args.inspect_events)
+        npool = max(8 * nkeep, 24)
+        recs_by_pos = {}
+        for sp in cfg["scan_points"]:
+            E = _pick_line(cfg["xray"], rng)
+            convs = [(sp["x_cm"], -sp["depth_mm"] / 10.0, 0.0, E) for _ in range(npool)]
+            r = simulate(convs, phys, maps, S, ipk, T, dt, args.gain, rng, keep_records=nkeep)
+            recs_by_pos[sp["name"]] = r["records"]
+            print(f"  inspect '{sp['name']}': {len(r['records'])}/{nkeep} events kept")
+        _plot_single(recs_by_pos, out, T)
+        print(f"done -> {out}/  (fe55_single.png)")
+        return 0
 
     scan_res, scan_meta, incl_res, spec = {}, {}, None, None
     if args.mode in ("both", "scan"):
