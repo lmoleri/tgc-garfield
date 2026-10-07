@@ -549,6 +549,7 @@ python3 tools/fe55_mc.py                       # both modes, defaults from confi
 python3 tools/fe55_mc.py --n-photons 50000 --seed 2 --gain polya --mode realistic
 python3 tools/fe55_mc.py --scan-grid           # scan every map grid point -> observable maps
 python3 tools/fe55_mc.py --inspect             # individual event pulses + per-primary microstructure
+python3 tools/fe55_mc.py --mode realistic --collimator 1.8   # circular 1.8 mm aperture on a wire
 ```
 
 All physics knobs live in `config/fe55_mc.json` (W-value, Fano, attenuation lengths, fluorescence
@@ -557,7 +558,9 @@ yield, track range/straggle, diffusion, the conversion-point scan list); CLI fla
 config's `scan_points` with every measured (depth, x) grid point. It is light (pure Python; ≈30k
 photons in ~13 s; the 50-point grid in ~1 min), so no cluster is needed.
 
-**Outputs** (`--out results/fe55_mc`): `fe55_spectrum.{png,csv}` (main + Ar-escape peaks, self-calibrated
+**Outputs** (`--out results/fe55_mc`): every realistic exposure gets BOTH a charge spectrum
+(`fe55_spectrum*`) and a peak-amplitude pulse-height spectrum (`fe55_amplitude*`) — the latter is more
+position-smeared since amplitude depends on pulse width as well as charge. `fe55_spectrum.{png,csv}` (main + Ar-escape peaks, self-calibrated
 energy axis, σ_E/E), `fe55_waveforms.png` (peak-aligned mean pulse vs conversion position +
 realistic-exposure pulses), `fe55_observables.csv` (peak/rise time, FWHM, amplitude, charge vs position),
 and with `--scan-grid` a `fe55_grid.png` of those observables mapped across the full cell, a
@@ -565,7 +568,13 @@ and with `--scan-grid` a `fe55_grid.png` of those observables mapped across the 
 swept in transverse position (fixed depth) and in depth (fixed transverse position). `--inspect` instead
 writes `fe55_single.png`: a grid of individual event pulses (absolute time, real amplitude) overlaid
 with the per-primary charge-arrival microstructure (gain vs arrival time) at the four characteristic
-positions.
+positions. `--collimator D_mm` (optionally `--collimator-center {wire,gap,both}`) restricts the
+realistic exposure to a circular aperture of diameter D on a wire, between wires, or both — the beam is
+along the gap, so the footprint is a disk in x-z whose chord-weighted x-marginal concentrates
+conversions near the center — and writes `fe55_spectrum_collim_<center>.png/.csv` plus
+`fe55_spectrum_compare.png` overlaying the collimated spectrum/spectra against the uniform full-cell one
+(the main-peak centroid shifts because the gain varies with distance from the wire); the matching
+`fe55_amplitude_collim_<center>` / `fe55_amplitude_compare` pulse-height versions are written too.
 
 **Built-in validation** (printed each run): main-peak centroid `≈ N·⟨g⟩`; escape/main charge ratio
 `≈ 2.94/5.9 ≈ 0.50`; escape fraction `≈ ω_K·P(escape)`; peak time grows with conversion depth and the

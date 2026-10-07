@@ -399,15 +399,21 @@ def _pick_line(xr, rng):
     return float(lines[int(rng.choice(len(lines), p=w))]["energy_eV"])
 
 
-def realistic_convs(n, phys, rng):
+def realistic_convs(n, phys, rng, collimator=None):
     """Random conversions: depth from exponential X-ray absorption through the gap
-    (truncated to the 2*gap crossing; lam>>gap -> ~uniform), x uniform over a pitch,
-    z arbitrary. Vectorized via the inverse CDF of the gap-truncated exponential."""
+    (truncated to the 2*gap crossing; lam>>gap -> ~uniform), z arbitrary. Transverse x
+    is uniform over a pitch, OR, with collimator={"r_cm","center_cm"}, uniform inside a
+    circular aperture of that radius centered there (beam along the gap -> a disk in the
+    x-z plane; its x-marginal is the chord-weighted semicircle). Depth unchanged."""
     gap, pitch, lam = phys["gap_cm"], phys["pitch_cm"], phys["lam5900"]
     wire0 = phys["wires"][len(phys["wires"]) // 2]
     ell = -lam * np.log1p(-rng.random(n) * (1.0 - np.exp(-2.0 * gap / lam)))
     y = gap - ell                                     # in (-gap, gap)
-    x = wire0 + rng.uniform(-pitch / 2, pitch / 2, n)
+    if collimator is None:
+        x = wire0 + rng.uniform(-pitch / 2, pitch / 2, n)
+    else:                                             # uniform in the disk -> semicircle x
+        rr = collimator["r_cm"] * np.sqrt(rng.random(n))
+        x = collimator["center_cm"] + rr * np.cos(rng.uniform(0, 2 * np.pi, n))
     lines = phys["xray"]["lines"]
     w = np.array([ln["weight"] for ln in lines], float); w /= w.sum()
     E = np.array([ln["energy_eV"] for ln in lines])[rng.choice(len(lines), size=n, p=w)]
@@ -416,48 +422,87 @@ def realistic_convs(n, phys, rng):
 
 # ─────────────────────────────────── plotting ──────────────────────────────
 
-def _plot_spectrum(res, out, phys):
+# Plotted per-photon quantity: (res key, scale, x-axis label, title word, centroid-unit).
+_QUANTITY = {
+    "charge":    ("Q",   1e3, r"collected charge  $Q=\sum_i g_i$  [$10^3$ gain-electrons]",
+                  "charge spectrum", "k"),
+    "amplitude": ("amp", 1e6, r"peak amplitude  $\max_t\,i(t)$  [$10^6$ arb.]",
+                  "pulse-height spectrum", "M"),
+}
+
+
+def _plot_spectrum(res, out, phys, quantity="charge", fname="fe55_spectrum", title_suffix=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    Q = res["Q"] / 1e3                                  # 10^3 gain-electrons
+    key, scale, xlabel, titleword, unit = _QUANTITY[quantity]
+    V = res[key] / scale
     tr = res["truth"]
-    main, esc = Q[tr == "main"], Q[tr == "escape"]
+    main, esc = V[tr == "main"], V[tr == "escape"]
     cen_main = float(np.mean(main)) if len(main) else float("nan")
     cen_esc = float(np.mean(esc)) if len(esc) else float("nan")
-    res_main = float(np.std(main) / np.mean(main)) if len(main) else float("nan")
-    keV_per_Q = 5.895 / cen_main if cen_main > 0 else float("nan")
+    sig_main = float(np.std(main) / np.mean(main)) if len(main) else float("nan")
+    keV_per = 5.895 / cen_main if cen_main > 0 else float("nan")
 
-    bins = np.linspace(0, np.percentile(Q, 99.5) * 1.1, 120)
+    bins = np.linspace(0, np.percentile(V, 99.5) * 1.1, 120)
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(Q, bins=bins, color="0.6", label=f"all (N={len(Q)})")
+    ax.hist(V, bins=bins, color="0.6", label=f"all (N={len(V)})")
     ax.hist(main, bins=bins, histtype="step", color="C0", lw=1.6,
-            label=f"main 5.9 keV (centroid={cen_main:.0f}k, "
-                  rf"$\sigma/E$={res_main*100:.1f}%)")
+            label=f"main 5.9 keV (centroid={cen_main:.0f}{unit}, "
+                  rf"$\sigma/E$={sig_main*100:.1f}%)")
     if len(esc):
         ax.hist(esc, bins=bins, histtype="step", color="C3", lw=1.6,
-                label=f"Ar escape (centroid={cen_esc:.0f}k, "
+                label=f"Ar escape (centroid={cen_esc:.0f}{unit}, "
                       f"esc/main={cen_esc/cen_main:.2f})")
     ax.axvline(cen_main, color="C0", ls=":", lw=1)
     if len(esc):
         ax.axvline(cen_esc, color="C3", ls=":", lw=1)
-    ax.set_xlabel(r"collected charge  $Q=\sum_i g_i$  [$10^3$ gain-electrons]")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("photons / bin")
-    ax.set_title(f"55Fe charge spectrum  (Ka+escape; {len(Q)} photons)")
-    sec = ax.secondary_xaxis("top", functions=(lambda q: q * keV_per_Q,
-                                               lambda e: e / keV_per_Q))
+    ax.set_title(f"55Fe {titleword}  (Ka+escape; {len(V)} photons){title_suffix}")
+    sec = ax.secondary_xaxis("top", functions=(lambda q: q * keV_per,
+                                               lambda e: e / keV_per))
     sec.set_xlabel("energy [keV]  (self-calibrated to the 5.9 keV peak)")
     ax.legend(fontsize=8)
-    fig.tight_layout(); fig.savefig(out / "fe55_spectrum.png", dpi=130)
-    pd.DataFrame({"Q_centre_k": 0.5 * (bins[1:] + bins[:-1]),
-                  "counts_all": np.histogram(Q, bins)[0],
+    fig.tight_layout(); fig.savefig(out / f"{fname}.png", dpi=130)
+    pd.DataFrame({"centre": 0.5 * (bins[1:] + bins[:-1]),
+                  "counts_all": np.histogram(V, bins)[0],
                   "counts_main": np.histogram(main, bins)[0],
                   "counts_escape": np.histogram(esc, bins)[0]}
-                 ).to_csv(out / "fe55_spectrum.csv", index=False)
-    return {"centroid_main_k": cen_main, "centroid_escape_k": cen_esc,
-            "sigmaE_over_E_main": res_main,
+                 ).to_csv(out / f"{fname}.csv", index=False)
+    return {"centroid_main": cen_main, "centroid_escape": cen_esc,
+            "sigma_over_main": sig_main,
             "escape_over_main": (cen_esc / cen_main) if cen_main > 0 else float("nan"),
             "escape_fraction": float(np.mean(tr == "escape"))}
+
+
+def _plot_spectrum_compare(results, specs, labels, out, phys, quantity="charge",
+                           fname="fe55_spectrum_compare"):
+    """Overlay the density-normalized distributions of several exposures (e.g. uniform
+    vs collimated on-wire / between-wires) on the quantity axis, to show how the
+    transverse sampling reshapes the spectrum. No energy axis (all are 5.9 keV; only the
+    collected charge / pulse height differs via the gain's position dependence)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    key, scale, xlabel, titleword, unit = _QUANTITY[quantity]
+    Vs = [res[key] / scale for res in results]
+    hi = max(np.percentile(V, 99.5) for V in Vs) * 1.1
+    bins = np.linspace(0, hi, 120)
+    cen0 = specs[0]["centroid_main"]
+    colors = ["0.4", "C1", "C0", "C2", "C4"]
+    fig, ax = plt.subplots(figsize=(8.5, 5))
+    for V, sp, lab, c in zip(Vs, specs, labels, colors):
+        ax.hist(V, bins=bins, density=True, histtype="step", color=c, lw=1.7,
+                label=f"{lab}: main={sp['centroid_main']:.0f}{unit}, "
+                      rf"$\sigma/E$={sp['sigma_over_main']*100:.1f}%, "
+                      f"x{sp['centroid_main']/cen0:.2f}")
+        ax.axvline(sp["centroid_main"], color=c, ls=":", lw=1)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("probability density")
+    ax.set_title(f"55Fe {titleword}: collimator-position comparison")
+    ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(out / f"{fname}.png", dpi=130)
 
 
 def _plot_waveforms(scan_res, incl_res, T, out):
@@ -654,6 +699,12 @@ def main() -> int:
                          "microstructure at the config's scan_points (standalone, fast)")
     ap.add_argument("--inspect-events", type=int, default=3,
                     help="events per position for --inspect (default 3)")
+    ap.add_argument("--collimator", type=float, default=None,
+                    help="circular collimator diameter [mm] on the realistic exposure; also writes "
+                         "fe55_spectrum_collim.png + fe55_spectrum_compare.png (vs the uniform spectrum)")
+    ap.add_argument("--collimator-center", choices=["wire", "gap", "both"], default="wire",
+                    help="center the collimator on a wire (default), between wires, or both "
+                         "(a 3-way comparison with the uniform spectrum)")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -700,7 +751,7 @@ def main() -> int:
         print(f"done -> {out}/  (fe55_single.png)")
         return 0
 
-    scan_res, scan_meta, incl_res, spec = {}, {}, None, None
+    scan_res, scan_meta, incl_res = {}, {}, None
     if args.mode in ("both", "scan"):
         if args.scan_grid:                               # every measured map grid point
             wire0 = wires[len(wires) // 2]
@@ -721,16 +772,43 @@ def main() -> int:
             if not args.scan_grid:
                 print(f"  scan '{name}': N={r['n']}  <Q>={r['Q'].mean():.0f}  "
                       f"peak-t={np.nanmean(r['tpeak']):.1f}ns  rise={np.nanmean(r['rise']):.1f}ns")
+    outputs = []
     if args.mode in ("both", "realistic"):
-        convs = realistic_convs(n_real, phys, rng)
-        incl_res = simulate(convs, phys, maps, S, ipk, T, dt, args.gain, rng, keep_samples=8)
-        spec = _plot_spectrum(incl_res, out, phys)
-        print(f"  realistic: N={incl_res['n']}  main={spec['centroid_main_k']:.0f}k  "
-              f"escape={spec['centroid_escape_k']:.0f}k  esc/main={spec['escape_over_main']:.2f}  "
-              f"sigmaE/E={spec['sigmaE_over_E_main']*100:.1f}%  "
-              f"esc-frac={spec['escape_fraction']*100:.1f}%")
+        incl_res = simulate(realistic_convs(n_real, phys, rng), phys, maps, S, ipk, T, dt,
+                            args.gain, rng, keep_samples=8)
+        exposures = [("full-cell uniform", "", incl_res)]      # (label, fname_tag, res)
+        if args.collimator:                                    # circular aperture on a wire / between wires
+            wire0 = wires[len(wires) // 2]
+            pitch_cm = cfg["geometry"]["wire_pitch_cm"]
+            centers = ["wire", "gap"] if args.collimator_center == "both" else [args.collimator_center]
+            for ctr in centers:
+                cx = wire0 + (pitch_cm / 2 if ctr == "gap" else 0.0)
+                coll = {"r_cm": args.collimator / 2.0 / 10.0, "center_cm": cx}
+                cres = simulate(realistic_convs(n_real, phys, rng, collimator=coll),
+                                phys, maps, S, ipk, T, dt, args.gain, rng, keep_samples=0)
+                exposures.append((f"collimated {args.collimator:g}mm on-{ctr}", f"collim_{ctr}", cres))
+        # charge spectrum AND peak-amplitude (pulse-height) spectrum for every exposure
+        for quantity, qtag in (("charge", "spectrum"), ("amplitude", "amplitude")):
+            unit = _QUANTITY[quantity][4]
+            specs = []
+            for label, tag, res in exposures:
+                fname = f"fe55_{qtag}" + (f"_{tag}" if tag else "")
+                specs.append(_plot_spectrum(res, out, phys, quantity=quantity, fname=fname,
+                                            title_suffix=(f" ({label})" if tag else "")))
+                outputs.append(f"{fname}.png/.csv")
+            if len(exposures) > 1:
+                _plot_spectrum_compare([e[2] for e in exposures], specs, [e[0] for e in exposures],
+                                       out, phys, quantity=quantity, fname=f"fe55_{qtag}_compare")
+                outputs.append(f"fe55_{qtag}_compare.png")
+            u = specs[0]
+            print(f"  {quantity} (uniform): N={incl_res['n']}  main={u['centroid_main']:.3g}{unit}  "
+                  f"esc/main={u['escape_over_main']:.2f}  sigma/E={u['sigma_over_main']*100:.1f}%  "
+                  f"esc-frac={u['escape_fraction']*100:.1f}%")
+            for (label, _, _), sp in zip(exposures[1:], specs[1:]):
+                print(f"  {quantity} ({label}): main={sp['centroid_main']:.3g}{unit}  "
+                      f"sigma/E={sp['sigma_over_main']*100:.1f}%  "
+                      f"ratio={sp['centroid_main']/u['centroid_main']:.3f}")
 
-    outputs = ["fe55_spectrum.png/.csv"] if incl_res else []
     if args.scan_grid and scan_res:
         _plot_grid(scan_meta, scan_res, out, wires); outputs.append("fe55_grid.png")
         _plot_fwhm(scan_meta, scan_res, out); outputs.append("fe55_fwhm.png")
