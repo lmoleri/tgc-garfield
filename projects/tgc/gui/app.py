@@ -98,10 +98,10 @@ def derive_gas_filename(gas: dict) -> str:
     T   = round(gas.get("temperature_K", 293.15))
     P   = round(gas.get("pressure_Torr", 760.0))
     Ee  = round(gas.get("max_electron_energy_eV", 2000.0))
-    Ef    = round(gas.get("e_field_max_vcm", 300000.0) / 1000)
+    Ef    = round(gas.get("e_field_max_vcm", 400000.0) / 1000)
     EfMin = round(gas.get("e_field_min_vcm", 100.0))
-    n   = gas.get("n_field_points", 20)
-    c   = gas.get("n_magboltz_collisions", 10)
+    n   = gas.get("n_field_points", 10)
+    c   = gas.get("n_magboltz_collisions", 2)
     pen = "pen" if gas.get("enable_penning", True) else "nopen"
     return f"{g1}{f1}_{g2}_{f2}_T{T}_P{P}_Ee{Ee}_Ef{EfMin}v-{Ef}k_n{n}_c{c}_{pen}.gas"
 
@@ -539,7 +539,7 @@ class ConfigPanel(QScrollArea):
 
         self.penning = QCheckBox()
         self.penning.setChecked(True)
-        self.ncoll = self._spin(1, 100, 10)
+        self.ncoll = self._spin(1, 100, 2)
         self.ncoll.setToolTip("Magboltz collision cycles per field point (higher = more accurate)")
         self.w_value = self._dspin(10.0, 100.0, 0.5, 1, 26.0)
         self.w_value.setToolTip("Effective ionisation energy W [eV per ion pair] for primary electron count")
@@ -549,7 +549,7 @@ class ConfigPanel(QScrollArea):
             "Upper electron energy for Magboltz cross-section table [eV].\n"
             "Must exceed peak electron energy near the wire (~500–1000 eV)."
         )
-        self.n_field_pts = self._spin(5, 500, 20)
+        self.n_field_pts = self._spin(5, 500, 10)
         self.n_field_pts.setToolTip(
             "Number of log-spaced E-field points for the Magboltz transport table.\n"
             "More points → smoother interpolation; fewer → faster gas generation."
@@ -559,7 +559,7 @@ class ConfigPanel(QScrollArea):
             "Minimum E-field in the Magboltz table [V/cm].\n"
             "100 V/cm is suitable for most TGC operating conditions."
         )
-        self.e_field_max = self._dspin(10_000.0, 1_000_000.0, 10_000.0, 0, 300_000.0)
+        self.e_field_max = self._dspin(10_000.0, 1_000_000.0, 10_000.0, 0, 400_000.0)
         self.e_field_max.setToolTip(
             "Maximum E-field in the Magboltz table [V/cm].\n"
             "Must exceed the peak near-wire field (~200–400 kV/cm at 1900 V)."
@@ -1129,12 +1129,12 @@ class ConfigPanel(QScrollArea):
         self.temperature.setValue(gas.get("temperature_K", 293.15))
         self.pressure.setValue(   gas.get("pressure_Torr", 760.0))
         self.penning.setChecked(  gas.get("enable_penning", True))
-        self.ncoll.setValue(      gas.get("n_magboltz_collisions", 10))
+        self.ncoll.setValue(      gas.get("n_magboltz_collisions", 2))
         self.w_value.setValue(    gas.get("w_value_eV", 26.0))
         self.max_electron_energy.setValue(gas.get("max_electron_energy_eV", 2000.0))
-        self.n_field_pts.setValue(        gas.get("n_field_points", 20))
+        self.n_field_pts.setValue(        gas.get("n_field_points", 10))
         self.e_field_min.setValue(        gas.get("e_field_min_vcm", 100.0))
-        self.e_field_max.setValue(        gas.get("e_field_max_vcm", 300_000.0))
+        self.e_field_max.setValue(        gas.get("e_field_max_vcm", 400_000.0))
 
         sim = d.get("simulation", {})
         self.n_events.setValue(        sim.get("n_events", 1000))
@@ -3586,6 +3586,22 @@ class MainWindow(QMainWindow):
 
     # ── Toolbar actions ───────────────────────────────────────────────────
 
+    def _confirm_gas_generation(self, gas_name) -> bool:
+        """Modal gate before a missing Magboltz gas table is generated. True = generate."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Magboltz gas table missing")
+        box.setText(
+            f"The gas table required for this configuration is not present:\n\n"
+            f"    {gas_name}\n\n"
+            f"Generating it runs Magboltz once and can take several minutes. It is written "
+            f"to the project root and reused afterwards.\n\nGenerate it now?")
+        gen = box.addButton("Generate gas table", QMessageBox.AcceptRole)
+        cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec_()
+        return box.clickedButton() is gen
+
     def _on_run(self):
         if not BINARY.exists():
             QMessageBox.critical(
@@ -3598,6 +3614,10 @@ class MainWindow(QMainWindow):
             return
 
         cfg     = self.config_panel.to_config_dict()
+        gas_name = derive_gas_filename(cfg["gas"])
+        if not (TGC_DIR / gas_name).exists() and not self._confirm_gas_generation(gas_name):
+            self.statusBar().showMessage("Run cancelled — gas table not generated.")
+            return
         out_str = self.config_panel.out_dir.text().strip() or "results"
 
         # Resolve relative paths from the tgc project directory

@@ -63,6 +63,32 @@ _MAPS_CACHE: dict = {}   # (shape, gain, tcut) -> bundle (uproot read is ~second
 _SIG_GEOM = ("wire_pitch_cm", "gap_cm", "wire_diameter_um", "n_wires", "wire_voltage_V")
 _SIG_GAS = ("gas1", "gas1_fraction_pct", "gas2", "temperature_K", "pressure_Torr")
 
+# Magboltz computation-grid fields: these define the gas-table filename and are kept
+# from the scan template (not the detector config) so produced maps reuse the committed
+# table and stay poolable with the committed scan maps (see _mkcfg / required_gas_file).
+_GAS_GRID = {"max_electron_energy_eV", "n_field_points", "n_magboltz_collisions",
+             "e_field_min_vcm", "e_field_max_vcm"}
+
+
+def _merge_scan_gas(template_gas: dict, detector_cfg: dict) -> dict:
+    """Scan template's Magboltz grid + the detector config's gas physics."""
+    out = dict(template_gas)
+    for k, v in detector_cfg.get("gas", {}).items():
+        if k not in _GAS_GRID:
+            out[k] = v
+    return out
+
+
+def required_gas_file(cfg: dict):
+    """Path to the Magboltz gas table a GarfieldScanRunner(cfg) would need.
+
+    Mirrors GarfieldScanRunner.run(): the scan template's grid with the detector
+    config's gas physics merged in, then the same name derivation tgc_sim uses.
+    """
+    import gain_scan as gs
+    tgas = json.loads(SCAN_GAIN_TEMPLATE.read_text()).get("gas", {})
+    return TGC_DIR / gs._derive_gas_filename(_merge_scan_gas(tgas, cfg))
+
 
 def _cfg_signature(cfg: dict) -> dict:
     """Detector-config signature (geometry + gas) used to match a config to its maps."""
@@ -246,8 +272,11 @@ class GarfieldScanRunner(QThread):
 
     def _mkcfg(self, template, n_events, label):
         base = json.loads(Path(template).read_text())
-        for blk in ("geometry", "gas"):           # adopt the detector config
-            base.setdefault(blk, {}).update(self._cfg.get(blk, {}))
+        base.setdefault("geometry", {}).update(self._cfg.get("geometry", {}))
+        # Adopt the detector gas physics, but keep the scan template's Magboltz
+        # computation grid so produced maps reuse the committed gas table and
+        # stay poolable with the committed scan maps (mirrored in required_gas_file).
+        base["gas"] = _merge_scan_gas(base.get("gas", {}), self._cfg)
         base["source"]["source_distances_mm"] = self._depths
         base["source"]["x_positions_cm"] = self._xpos
         base["simulation"]["n_events"] = int(n_events)
@@ -929,8 +958,28 @@ class Fe55MCPanel(QWidget):
         if dlg.exec_() == QDialog.Accepted:
             self._launch_garfield(depths, xpos, n_gain.value(), n_wf.value(), jobs.value())
 
+    def _confirm_gas_generation(self, gas_name) -> bool:
+        """Modal gate before a missing Magboltz gas table is generated. True = generate."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Magboltz gas table missing")
+        box.setText(
+            f"The gas table required for this configuration is not present:\n\n"
+            f"    {gas_name}\n\n"
+            f"Generating it runs Magboltz once and can take several minutes. It is written "
+            f"to the project root and reused afterwards.\n\nGenerate it now?")
+        gen = box.addButton("Generate gas table", QMessageBox.AcceptRole)
+        cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec_()
+        return box.clickedButton() is gen
+
     def _launch_garfield(self, depths, xpos, n_gain, n_wf, jobs):
         cfg = self.config_panel.to_config_dict()
+        gas_file = required_gas_file(cfg)
+        if not gas_file.exists() and not self._confirm_gas_generation(gas_file.name):
+            self._log_cb(f"[scan] cancelled — gas table {gas_file.name} not generated.")
+            return
         self._gscan = GarfieldScanRunner(cfg, depths, xpos, self.gain_dir.text(),
                                          self.shape_dir.text(), n_gain, n_wf, jobs)
         self._gscan.log_line.connect(self._log_cb)
