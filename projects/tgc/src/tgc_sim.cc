@@ -153,6 +153,7 @@ struct GasConfig {
 struct SimulationConfig {
   std::size_t nEvents          = 1000;
   std::size_t maxAvalancheSize = 500000;
+  std::size_t autosaveEveryEvents = 50;  // crash-safe checkpoint cadence [events]; 0 disables
   double      timeWindowNs     = 300.0;
   double      timeStepNs       = 0.5;
   bool        enableIonDrift   = true;
@@ -512,6 +513,7 @@ Config LoadConfig(const fs::path& path) {
   if (const auto* s = FindSection(root, "simulation")) {
     cfg.simulation.nEvents          = ReadSizeT (*s, "simulation", "n_events",          cfg.simulation.nEvents);
     cfg.simulation.maxAvalancheSize = ReadSizeT (*s, "simulation", "max_avalanche_size", cfg.simulation.maxAvalancheSize);
+    cfg.simulation.autosaveEveryEvents = ReadSizeT (*s, "simulation", "autosave_every_events", cfg.simulation.autosaveEveryEvents);
     cfg.simulation.timeWindowNs     = ReadDouble(*s, "simulation", "time_window_ns",     cfg.simulation.timeWindowNs);
     cfg.simulation.timeStepNs       = ReadDouble(*s, "simulation", "time_step_ns",       cfg.simulation.timeStepNs);
     cfg.simulation.enableIonDrift   = ReadBool  (*s, "simulation", "enable_ion_drift",   cfg.simulation.enableIonDrift);
@@ -1076,7 +1078,15 @@ DistanceSummary RunDistancePoint(const Config& cfg,
 
   // ── Per-event signal tree ────────────────────────────────────────────────────
   TTree signalTree("t_signals", "Per-event signal waveforms");
-  signalTree.SetDirectory(nullptr);
+  // Stream entries straight to the output directory and checkpoint the whole file
+  // (TFile::Write) every kAutoSaveEvery events, so a killed run stays readable up to
+  // the last checkpoint instead of losing the whole point — the file is otherwise
+  // flushed only at the very end. Note: TFile::Write (not TTree::AutoSave) is used so
+  // the directory key list is rewritten and the partial file is uproot-readable, not
+  // just ROOT-recoverable. distDir==nullptr keeps the old in-memory behavior.
+  const std::size_t kAutoSaveEvery = cfg.simulation.autosaveEveryEvents;
+  if (distDir) signalTree.SetDirectory(distDir);
+  else         signalTree.SetDirectory(nullptr);
   std::vector<float> anodeSig(nBins, 0.f), cathodeSig(nBins, 0.f);
   std::vector<float> anodeSigE(nBins, 0.f), anodeSigI(nBins, 0.f);
   std::vector<float> cathodeSigE(nBins, 0.f), cathodeSigI(nBins, 0.f);
@@ -1384,6 +1394,11 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     evtQa = static_cast<float>(qAnode);
     evtQc = static_cast<float>(qCathode);
     signalTree.Fill();
+    // Crash-safe checkpoint: persist the tree + file header periodically so a kill
+    // loses at most the last kAutoSaveEvery events of this point, not the whole run.
+    if (distDir && kAutoSaveEvery > 0 && (ev + 1) % kAutoSaveEvery == 0) {
+      if (auto* cf = signalTree.GetCurrentFile()) cf->Write("", TObject::kOverwrite);
+    }
 
     hAnodeQ.Fill(qAnode);
     hCathodeQ.Fill(qCathode);
@@ -1425,7 +1440,8 @@ DistanceSummary RunDistancePoint(const Config& cfg,
     pCathodeAmp.Write("p_cathode_amp");
     pAnodeAmpInt.Write("p_anode_amp_int");
     pCathodeAmpInt.Write("p_cathode_amp_int");
-    signalTree.Write("t_signals");
+    if (auto* cf = signalTree.GetCurrentFile())
+      cf->Write("", TObject::kOverwrite);   // full flush: writes the dir key list uproot needs
   }
 
   // ── Build summary ─────────────────────────────────────────────────────────────
@@ -1611,6 +1627,7 @@ json ConfigToJson(const Config& cfg) {
     {"simulation", {
       {"n_events",           cfg.simulation.nEvents},
       {"max_avalanche_size", cfg.simulation.maxAvalancheSize},
+      {"autosave_every_events", cfg.simulation.autosaveEveryEvents},
       {"time_window_ns",     cfg.simulation.timeWindowNs},
       {"time_step_ns",       cfg.simulation.timeStepNs},
       {"enable_ion_drift",   cfg.simulation.enableIonDrift},
@@ -1665,6 +1682,9 @@ int main(int argc, char* argv[]) {
     const fs::path runDir = opts.outDir /
         (opts.runName.empty() ? BuildRunFolderName(cfg) : opts.runName);
     EnsureDirectory(runDir);
+    // Write the run config up front so a killed/recovered run still carries it
+    // (the GUI matches measured points via run_config.json).
+    WriteJsonFile(runDir / "run_config.json", ConfigToJson(cfg));
 
     std::cout << "TGC Garfield++ simulation\n"
               << "  config  : " << opts.configPath << "\n"
@@ -1839,7 +1859,6 @@ int main(int argc, char* argv[]) {
     rootFile.Close();
 
     WriteSummaryCsv(runDir / "summary.csv", allSummaries);
-    WriteJsonFile(runDir / "run_config.json", ConfigToJson(cfg));
 
     std::cout << "\nDone. Results written to " << runDir << "\n";
     return 0;
