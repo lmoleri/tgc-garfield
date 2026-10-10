@@ -135,10 +135,11 @@ def _gain_stats(gain_dir):
 
 
 def _wf_stats(shape_dir):
-    """Minimum measured events/point in the waveform (shape/drift) maps, from
-    waveform_drift.csv; None if absent. Mirrors _gain_stats for the shape/drift maps."""
+    """Minimum measured events/point in the single-electron SHAPE map, from
+    waveform_shapes.csv; None if absent. Gates wf_stats on the shape's own stats —
+    the drift map now comes from the gain scan, so its count is covered by the gain gate."""
     import pandas as pd
-    f = Path(shape_dir) / "waveform_drift.csv"
+    f = Path(shape_dir) / "waveform_shapes.csv"
     if not f.exists():
         return None
     try:
@@ -720,12 +721,12 @@ class Fe55MCPanel(QWidget):
         self.coll_d.setValue(1.8); self.coll_d.setSingleStep(0.1); self.coll_d.setSuffix(" mm")
         self.coll_center = QComboBox(); self.coll_center.addItems(["both", "wire", "gap"])
         self.inspect_events = QSpinBox(); self.inspect_events.setRange(1, 8); self.inspect_events.setValue(3)
-        # position-grid parameters (resolution + extent); defaults reproduce the native 5x10 grid
+        # position-grid parameters (resolution + extent); defaults reproduce the native 9x19 grid
         _gtip = ("Position-grid resolution/extent. Drift & timing are interpolated; the GAIN is sampled "
                  "from the nearest measured cell, so finer grids leave the charge/amplitude maps stepwise "
                  "at the native resolution.")
-        self.g_ndepth = QSpinBox(); self.g_ndepth.setRange(2, 21); self.g_ndepth.setValue(5)
-        self.g_ndist = QSpinBox(); self.g_ndist.setRange(2, 41); self.g_ndist.setValue(10)
+        self.g_ndepth = QSpinBox(); self.g_ndepth.setRange(2, 21); self.g_ndepth.setValue(9)
+        self.g_ndist = QSpinBox(); self.g_ndist.setRange(2, 41); self.g_ndist.setValue(19)
         self.g_dmin = QDoubleSpinBox(); self.g_dmin.setRange(0.1, 1.3); self.g_dmin.setDecimals(2)
         self.g_dmin.setSingleStep(0.1); self.g_dmin.setValue(0.1); self.g_dmin.setSuffix(" mm")
         self.g_dmax = QDoubleSpinBox(); self.g_dmax.setRange(0.1, 1.3); self.g_dmax.setDecimals(2)
