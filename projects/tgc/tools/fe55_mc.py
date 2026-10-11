@@ -948,8 +948,9 @@ def main() -> int:
                 if abs(m["depth_mm"] - yv) < 1e-6 and abs(m["d_wire_mm"] - dv) < 1e-6:
                     overlay[lbl] = scan_res[name]; break
         _plot_waveforms(overlay, incl_res, T, out); outputs.append("fe55_waveforms.png")
-    elif scan_res or incl_res:
-        _plot_waveforms(scan_res, incl_res, T, out); outputs.append("fe55_waveforms.png")
+    elif scan_res:                                   # left panel needs scan positions; a
+        _plot_waveforms(scan_res, incl_res, T, out)  # realistic-only run must not clobber this
+        outputs.append("fe55_waveforms.png")         # two-panel figure with an empty left panel
 
     rows = []
     for name, r in scan_res.items():
