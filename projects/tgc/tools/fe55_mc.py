@@ -169,8 +169,9 @@ def load_gain_cells(gain_dir: Path, wires: np.ndarray, ys: np.ndarray, ds: np.nd
 # ───────────────────────────── interpolation ───────────────────────────────
 
 def _bilin(ys, ds, Z, yq, dq):
-    """Bilinear interpolation of Z on the regular (ys, ds) grid, edge-clamped."""
-    yq = np.clip(yq, ys[0], ys[-1])
+    """Bilinear interpolation of Z on the regular (ys, ds) grid: clamped in distance,
+    linearly extrapolated in depth, so a primary cloud reaching past the deep grid edge
+    keeps its true (larger) drift instead of being truncated to the edge value."""
     dq = np.clip(dq, ds[0], ds[-1])
     iy = np.clip(np.searchsorted(ys, yq) - 1, 0, len(ys) - 2)
     idd = np.clip(np.searchsorted(ds, dq) - 1, 0, len(ds) - 2)
@@ -350,7 +351,7 @@ def simulate(convs, phys, maps, S, ipk, T, dt, gain_mode, rng, keep_samples=0, k
         if len(pos) == 0:
             continue
         y = np.clip(pos[:, 1], -gap + 1e-4, gap - 1e-4)
-        depth = np.clip(np.abs(y) * 10.0, ys[0], ys[-1])          # mm
+        depth = np.abs(y) * 10.0          # mm (physical depth; drift extrapolates off-grid)
         xx = pos[:, 0]
         if phys["diff"]["enable_transverse"]:                      # transverse diffusion
             sig = phys["diff"]["sigma_um_per_sqrt_cm"] * 1e-4 * np.sqrt(np.abs(y))
