@@ -549,6 +549,10 @@ def _plot_grid(meta, scan_res, out, wires):
                      "peak_t": float(np.nanmean(r["tpeak"])), "rise": float(np.nanmean(r["rise"])),
                      "amp": float(r["amp"].mean()), "Q": float(r["Q"].mean()) / 1e3})
     df = pd.DataFrame(rows)
+    print(f"  grid observables ({len(df)} pts): "
+          f"peak_t={df.peak_t.min():.1f}-{df.peak_t.max():.1f}ns  "
+          f"rise={df.rise.min():.1f}-{df.rise.max():.1f}ns  "
+          f"per-point charge={df.Q.min():.0f}-{df.Q.max():.0f} (x1e3)")
     panels = [("peak_t", "Peak time [ns]  (drift timing)", "viridis"),
               ("rise", "Rise time 10-90% [ns]  (pulse shape)", "magma"),
               ("amp", "Mean peak amplitude [arb.]", "cividis"),
@@ -567,6 +571,17 @@ def _plot_grid(meta, scan_res, out, wires):
     fig.savefig(out / "fe55_grid.png", dpi=130)
 
 
+def _even_subset(vals, maxn):
+    """Evenly-spaced subset of <= maxn values (endpoints kept) for legible dense grids."""
+    if len(vals) <= maxn:
+        return list(vals)
+    stride = -(-len(vals) // maxn)          # ceil(len/maxn)
+    sub = list(vals[::stride])
+    if vals[-1] not in sub:
+        sub.append(vals[-1])
+    return sub
+
+
 def _plot_grid_dists(meta, scan_res, out, quantity):
     """Small-multiples matrix (rows = depth, cols = distance from wire) of the per-point
     distribution of a per-event quantity (charge or peak amplitude), with the main/escape
@@ -577,6 +592,11 @@ def _plot_grid_dists(meta, scan_res, out, quantity):
     key, scale, xlabel, titleword, unit, cfmt = _QUANTITY[quantity]
     ys_u = sorted({m["depth_mm"] for m in meta.values()})
     ds_u = sorted({m["d_wire_mm"] for m in meta.values()})
+    # keep the matrix legible on a dense grid: show a representative subset of
+    # positions (~5 depths x ~10 distances); all other figures use the full grid.
+    subset = len(ys_u) > 6 or len(ds_u) > 10
+    ys_u = _even_subset(ys_u, 6)
+    ds_u = _even_subset(ds_u, 10)
     at, allv = {}, []
     for name, m in meta.items():
         r = scan_res[name]
@@ -613,7 +633,8 @@ def _plot_grid_dists(meta, scan_res, out, quantity):
             if i == 0:
                 ax.set_title(f"d={dv:g}mm", fontsize=6)
     fig.supxlabel(xlabel, fontsize=9)
-    fig.suptitle(f"55Fe per-point {titleword}s across the grid  "
+    fig.suptitle(f"55Fe per-point {titleword}s across the grid"
+                 f"{'  (representative subset of positions)' if subset else ''}  "
                  f"(rows = depth, cols = distance from wire; blue = main, red = escape)", y=1.0)
     fig.tight_layout()
     fig.savefig(out / f"fe55_grid_{quantity}.png", dpi=130)
@@ -631,6 +652,8 @@ def _plot_fwhm(meta, scan_res, out):
             continue
         rows.append({"d_wire_mm": m["d_wire_mm"], "depth_mm": m["depth_mm"],
                      "fwhm": _fwhm_ns(r["t_rel"], r["aligned_mean"])})
+    _fw = [r["fwhm"] for r in rows]
+    print(f"  FWHM range: {min(_fw):.1f}-{max(_fw):.1f} ns")
     piv = pd.DataFrame(rows).pivot_table(index="depth_mm", columns="d_wire_mm", values="fwhm")
     fig, ax = plt.subplots(figsize=(7.5, 6))
     im = ax.pcolormesh(piv.columns.to_numpy(), piv.index.to_numpy(), piv.to_numpy(),

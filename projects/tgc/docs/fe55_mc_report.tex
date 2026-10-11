@@ -27,7 +27,7 @@ a prior scan, and stamps the measured single-electron waveform; the sum is the e
 reproduces the characteristic \Fe{} charge spectrum (the 5.9~keV photopeak and the Ar escape peak at
 half the charge) from first principles, and is then used to study the pulse shape, the energy
 resolution, and their dependence on the conversion position and on the X-ray collimation. The tool is
-fast (a full 50-point position grid plus a $2\times10^{4}$-photon exposure runs in about one minute on a
+fast (a full 171-point position grid plus a $2\times10^{4}$-photon exposure runs in a few minutes on a
 laptop) and is implemented in \texttt{tools/fe55\_mc.py}.
 \end{abstract}
 
@@ -64,6 +64,9 @@ symmetry of the wire plane):
   \item the per-position avalanche-gain distribution (the full Polya, including the finite probability
         of zero gain from attachment), measured as the per-event avalanche size.
 \end{itemize}
+All three inputs are tabulated on a 9~(depth) $\times$ 19~(distance-from-wire) grid of 171 cells per
+half-pitch wire cell; $\bar\tau$ and $\sigma_\tau$ are read from the single-electron spike time of the
+(ion-off) gain scan, while the shape $S(t')$ is the position-independent ion-on measurement.
 Figure~\ref{fig:shape} shows the measured single-electron response. The peak-aligned shapes overlay
 across positions (upper panels), confirming the position independence of $S(t')$ that the model relies
 on; the lower panels show that the electron drift time grows smoothly with depth and distance from the
@@ -197,14 +200,14 @@ set in \texttt{config/fe55\_mc.json}.
 Figure~\ref{fig:spectrum} shows the collected-charge spectrum $Q=\sum_i g_i$ over the realistic
 exposure. The model reproduces the classic \Fe{}-in-argon double-peak structure with no tuning:
 \begin{itemize}
-  \item the \textbf{main-peak centroid} equals $N\langle g\rangle \approx 227\times31800 \approx
-        7.2\times10^{6}$ gain-electrons;
+  \item the \textbf{main-peak centroid} equals $N\langle g\rangle \approx 227\times32467 \approx
+        7.3\times10^{6}$ gain-electrons;
   \item the \textbf{escape/main charge ratio} is $0.50$, matching the energy ratio
         $2.94/5.9=0.498$;
   \item the \textbf{escape fraction} is $\approx 9.5\%$, consistent with $\omega_K$ times the
         geometric escape probability of the thin gap.
 \end{itemize}
-The energy resolution of the uniform exposure is $\sigma_E/E\approx19\%$. This is broader than a
+The energy resolution of the uniform exposure is $\sigma_E/E\approx16\%$. This is broader than a
 textbook proportional counter because it is dominated not by the Polya and Fano terms
 ($\sqrt{(\sigma_g/\langle g\rangle)^2 + F}\,/\sqrt{N}\approx7\%$) but by the \emph{gain
 non-uniformity across the cell} sampled by a full-cell exposure — see Sec.~\ref{sec:res} and~\ref{sec:perpoint}.
@@ -247,7 +250,7 @@ sweeping depth at fixed transverse position leaves the shape nearly unchanged.
 The timing and width observables across the full cell are mapped in Fig.~\ref{fig:grid} and the pulse
 FWHM in Fig.~\ref{fig:fwhm}. The peak time (drift time) grows from $\sim$1~ns
 (shallow, on-wire) to $\sim$24~ns (deep, mid-gap); the 10--90\% rise time spans
-1.1--7.1~ns and the FWHM 1.5--14.6~ns, both governed almost
+1.1--6.5~ns and the FWHM 1.7--12.5~ns, both governed almost
 entirely by the distance from the wire.
 
 \begin{figure}[htbp]
@@ -261,8 +264,8 @@ entirely by the distance from the wire.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.72\textwidth]{fe55_fwhm.png}
-  \caption{Pulse FWHM versus position: $\sim$1.5--3~ns across the near-wire region,
-  rising to $\sim$10--15~ns toward the mid-gap. The gradient is almost purely
+  \caption{Pulse FWHM versus position: $\sim$1.7--3~ns across the near-wire region,
+  rising to $\sim$10--12~ns toward the mid-gap. The gradient is almost purely
   transverse.}
   \label{fig:fwhm}
 \end{figure}
@@ -306,7 +309,7 @@ process. The numbers are collected in Table~\ref{tab:summary}.
 A fast current readout measures the pulse height rather than the integrated charge. Because the peak
 amplitude depends on the pulse \emph{width} as well as the charge ($A\propto Q/\mathrm{width}$), and the
 width varies strongly across the cell, the pulse-height spectrum is far more position-smeared than the
-charge spectrum: $\sigma_E/E\approx38\%$ for the uniform exposure (Fig.~\ref{fig:amp}), versus $19\%$
+charge spectrum: $\sigma_E/E\approx34\%$ for the uniform exposure (Fig.~\ref{fig:amp}), versus $16\%$
 for charge. Under collimation the on-wire aperture is now the \emph{tighter} one (sharp pulses track the
 charge directly), the reverse of the charge case (Fig.~\ref{fig:ampcompare}). The practical conclusion
 is that, for this chamber, the integrated charge is a substantially better energy estimator than the
@@ -332,11 +335,11 @@ peak pulse height.
 \subsection{Per-position distributions}
 \label{sec:perpoint}
 Figures~\ref{fig:gridcharge} and~\ref{fig:gridamp} show the charge and pulse-height distributions at
-every one of the 50 grid points. At a \emph{fixed} position each main peak is sharp (a few percent),
+every point of the 171-point grid (a representative subset is shown). At a \emph{fixed} position each main peak is sharp (a few percent),
 confirming that the broad full-cell spectra of Figs.~\ref{fig:spectrum} and~\ref{fig:amp} arise from
 mixing positions, not from an intrinsically poor single-position resolution. The per-point charge is
-highest on-wire at mid-depth ($\sim$10500k) and lowest at the on-wire-shallow ``notch''
-($\sim$3240k), where a primary born inside the avalanche region has little path to multiply; the
+highest on-wire at mid-depth ($\sim$9500k) and lowest at the on-wire-shallow ``notch''
+($\sim$3840k), where a primary born inside the avalanche region has little path to multiply; the
 peak amplitude peaks on-wire at mid-depth and falls monotonically toward the mid-gap.
 
 \begin{figure}[p]
@@ -365,11 +368,11 @@ the following picture of the chamber's signal:
 \begin{itemize}
   \item the \textbf{pulse shape} is set by the transverse distance from the wire (sharp on-wire, broad
         mid-gap) and is nearly independent of depth, which only sets the drift delay;
-  \item the \textbf{energy resolution} from integrated charge is $\approx19\%$ for a full-cell
-        exposure, improving to $\approx17\%$ when collimated between wires and degrading to $\approx20\%$
+  \item the \textbf{energy resolution} from integrated charge is $\approx16\%$ for a full-cell
+        exposure, improving to $\approx14\%$ when collimated between wires and degrading to $\approx17\%$
         on a wire; at a fixed position it is intrinsically a few percent, so the spread is dominated by
         gain non-uniformity across the cell;
-  \item the \textbf{peak pulse height} is a markedly poorer energy estimator ($\approx38\%$) than the
+  \item the \textbf{peak pulse height} is a markedly poorer energy estimator ($\approx34\%$) than the
         integrated charge, because it also folds in the position-dependent pulse width.
 \end{itemize}
 
@@ -385,9 +388,9 @@ the following picture of the chamber's signal:
     \cmidrule(lr){2-3}\cmidrule(lr){4-5}
     Exposure & centroid & $\sigma_E/E$ & centroid & $\sigma_E/E$ \\
     \midrule
-    Full-cell uniform        & 7220 & 19\% & 1.96 & 38\% \\
-    Collimated, on-wire      & 7380 & 20\% & 2.12 & 35\% \\
-    Collimated, between wires & 7020 & 17\% & 1.80 & 38\% \\
+    Full-cell uniform        & 7338 & 16\% & 1.99 & 34\% \\
+    Collimated, on-wire      & 7489 & 17\% & 2.14 & 31\% \\
+    Collimated, between wires & 7142 & 14\% & 1.83 & 35\% \\
     \bottomrule
   \end{tabular}
 \end{table}
