@@ -1,0 +1,77 @@
+{
+  "_comment": "Electron drift-time map for the 55Fe MC (run with: tgc_sim --drift-map). DriftLineRKF integrates one drift line per source grid point and returns mean_drift_ns (tau_bar) and rms_drift_ns (sigma_tau, from the integrated LONGITUDINAL diffusion) at continuous resolution, analytically and in seconds (no avalanche, no ions, no 0.5 ns argmax binning). ion drift OFF and amplifier OFF (electrons only). Geometry/gas are byte-identical to scan_gain.json / default_tgc.json so the committed .gas table is reused (no Magboltz regeneration). The source grid matches scan_gain.json / scan_waveform.json so the map aligns cell-for-cell with the gain and shape scans. n_events is IGNORED in --drift-map mode (RKF uses one line per cell). CAVEATS: rms_drift_ns is longitudinal diffusion only and under-counts the transverse/which-wire spread toward the inter-wire mid-plane (where the microscopic avalanche map is more complete); cells on the exact symmetry plane ride the field saddle, are flagged reached_wire=0 and written NaN. Investigation note: a faithful continuous sigma_tau was found NOT to change the 55Fe amplitude resolution (de-quantizing moved it 33.7%->34.1%), so this map is a diagnostic/utility, not a fix for the amplitude.",
+  "geometry": {
+    "wire_pitch_cm": 0.18,
+    "wire_diameter_um": 50.0,
+    "gap_cm": 0.14,
+    "n_wires": 10,
+    "wire_voltage_V": 1900.0,
+    "sense_wires": null
+  },
+  "readout": {
+    "type": "conductive"
+  },
+  "amplifier": {
+    "enable": false
+  },
+  "source": {
+    "energy_keV": 0.026,
+    "source_distances_mm": [
+      0.1,
+      0.25,
+      0.4,
+      0.55,
+      0.7,
+      0.85,
+      1.0,
+      1.15,
+      1.3
+    ],
+    "x_positions_cm": [
+      0.09,
+      0.095,
+      0.1,
+      0.105,
+      0.11,
+      0.115,
+      0.12,
+      0.125,
+      0.13,
+      0.135,
+      0.14,
+      0.145,
+      0.15,
+      0.155,
+      0.16,
+      0.165,
+      0.17,
+      0.175,
+      0.18
+    ]
+  },
+  "gas": {
+    "gas1": "ar",
+    "gas1_fraction_pct": 70.0,
+    "gas2": "co2",
+    "ion_species": "co2",
+    "temperature_K": 293.15,
+    "pressure_Torr": 760.0,
+    "enable_penning": true,
+    "n_magboltz_collisions": 2,
+    "w_value_eV": 26.0,
+    "max_electron_energy_eV": 2000.0,
+    "n_field_points": 10,
+    "e_field_min_vcm": 100.0,
+    "e_field_max_vcm": 400000.0
+  },
+  "simulation": {
+    "n_events": 150,
+    "max_avalanche_size": 500000,
+    "time_window_ns": 100.0,
+    "time_step_ns": 0.5,
+    "enable_ion_drift": false,
+    "store_drift_lines": false,
+    "ion_max_step_um": 5.0,
+    "random_seed": 1
+  }
+}

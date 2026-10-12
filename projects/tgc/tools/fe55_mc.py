@@ -93,10 +93,12 @@ def load_shape(shape_dir: Path, tcut: float):
     return ts, S, ipk
 
 
-def _grid_from_drift(shape_dir: Path, wires: np.ndarray):
+def _grid_from_drift(shape_dir: Path, wires: np.ndarray, drift_csv=None):
     """Build the regular (depth_mm, d_from_wire_mm) grid of mean/rms drift [ns].
-    d = distance to the nearest wire (the physical variable; folds the full pitch)."""
-    df = pd.read_csv(shape_dir / "waveform_drift.csv")
+    d = distance to the nearest wire (the physical variable; folds the full pitch).
+    drift_csv overrides the default shape_dir/waveform_drift.csv (e.g. a tgc_sim
+    --drift-map product: continuous-resolution mean_drift_ns / rms_drift_ns)."""
+    df = pd.read_csv(Path(drift_csv) if drift_csv else shape_dir / "waveform_drift.csv")
     df["d_mm"] = df["x_position_cm"].apply(
         lambda x: float(np.min(np.abs(x - wires))) * 10.0).round(4)
     df["depth_mm"] = df["source_distance_mm"].round(4)
@@ -756,11 +758,12 @@ def _plot_sweep(meta, scan_res, out):
 
 # ─────────────────────── reusable compute API (CLI + GUI) ──────────────────
 
-def load_maps(shape_dir, gain_dir, cfg, tcut):
-    """Load every position-scan input once into a bundle reused across studies."""
+def load_maps(shape_dir, gain_dir, cfg, tcut, drift_csv=None):
+    """Load every position-scan input once into a bundle reused across studies.
+    drift_csv overrides the drift map (default shape_dir/waveform_drift.csv)."""
     wires = _wire_positions_cm(cfg["geometry"])
     ts, S, ipk = load_shape(Path(shape_dir), tcut)
-    ys, ds, tau, rms = _grid_from_drift(Path(shape_dir), wires)
+    ys, ds, tau, rms = _grid_from_drift(Path(shape_dir), wires, drift_csv)
     cells, gmean, grms = load_gain_cells(Path(gain_dir), wires, ys, ds)
     dt = cfg["run"]["out_time_step_ns"]
     T = np.arange(-10.0, float(np.nanmax(tau)) + tcut + 15.0 + dt, dt)
@@ -831,6 +834,8 @@ def main() -> int:
     ap.add_argument("--config", default=str(TGC_DIR / "config" / "fe55_mc.json"))
     ap.add_argument("--shape-dir", default=str(TGC_DIR / "results" / "scan_waveform_halfpitch"))
     ap.add_argument("--gain-dir", default=str(TGC_DIR / "results" / "gain_scan_halfpitch"))
+    ap.add_argument("--drift-map", default=None,
+                    help="drift map CSV (tgc_sim --drift-map); overrides shape-dir/waveform_drift.csv")
     ap.add_argument("--out", default=str(TGC_DIR / "results" / "fe55_mc"))
     ap.add_argument("--n-photons", type=int, default=None, help="realistic-exposure photons")
     ap.add_argument("--seed", type=int, default=None)
@@ -866,7 +871,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"loading maps:  shape={shape_dir.name}  gain={gain_dir.name}")
-    bundle = load_maps(shape_dir, gain_dir, cfg, tcut)
+    bundle = load_maps(shape_dir, gain_dir, cfg, tcut, drift_csv=args.drift_map)
     wires, S, ipk, T, maps = bundle["wires"], bundle["S"], bundle["ipk"], bundle["T"], bundle["maps"]
     phys = build_phys(cfg, wires)
     print(f"  shape: {len(S)} bins, t'=[{bundle['ts'][0]:g},{bundle['ts'][-1]:g}]ns, peak@idx{ipk}; "

@@ -371,6 +371,7 @@ struct CliOptions {
   fs::path outDir{"results"};
   std::string runName;                    // empty = auto-generate from config
   std::optional<double> singleDistanceMm;
+  bool driftMap = false;                  // drift-only τ̄/σ_τ extraction, then exit
 };
 
 [[noreturn]] void PrintUsageAndExit(const char* prog, int code) {
@@ -380,6 +381,8 @@ struct CliOptions {
          "  --out    <dir>     Output directory (default: results)\n"
          "  --run-name <name>  Subdirectory name under --out (default: auto)\n"
          "  --distance <mm>    Run only this source distance (overrides config list)\n"
+         "  --drift-map        Drift-only pass: write drift_map.csv (mean/rms drift time\n"
+         "                     per source grid point via DriftLineRKF) and exit; no avalanche\n"
          "  --help             Show this message\n";
   std::exit(code);
 }
@@ -400,6 +403,8 @@ CliOptions ParseCli(int argc, char* argv[]) {
     } else if (arg == "--distance") {
       if (i + 1 >= argc) PrintUsageAndExit(argv[0], 1);
       opts.singleDistanceMm = std::stod(argv[++i]);
+    } else if (arg == "--drift-map") {
+      opts.driftMap = true;
     } else if (arg == "--help" || arg == "-h") {
       PrintUsageAndExit(argv[0], 0);
     } else {
@@ -1652,6 +1657,89 @@ std::string BuildRunFolderName(const Config& cfg) {
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────── drift-only map (τ̄, σ_τ) ────────────────────────
+// Fast electron drift-time map via DriftLineRKF: one drift line per source grid point
+// gives the drift time (GetDriftTime → mean_drift_ns) and the arrival-time spread from
+// the integrated LONGITUDINAL diffusion (GetArrivalTimeSpread → rms_drift_ns), analytic
+// and at continuous resolution — no avalanche, no ions, no 0.5 ns argmax binning.  Runs
+// in seconds and reuses the committed gas table.  Column names match waveform_drift.csv
+// so fe55_mc._grid_from_drift reads the output unchanged.
+//
+// CAVEATS (RKF integrates a single mean field line — documented honestly):
+//   • rms_drift_ns is LONGITUDINAL diffusion only; it UNDER-counts the transverse /
+//     which-wire contribution to the arrival-time spread, which grows toward the
+//     inter-wire mid-plane.  There the microscopic avalanche-based map (gain_scan.py
+//     waveform()) is the more complete σ_τ.
+//   • On the exact symmetry plane the mean field line rides the low-field saddle rather
+//     than curling cleanly onto a wire, so the drift time is unreliable (overestimated
+//     ~2×).  Such cells are flagged reached_wire=0 and their mean/rms are written NaN
+//     rather than a bogus value (fe55_mc._fill_nan then fills them from neighbours).
+void RunDriftMap(const Config& cfg, Sensor& sensor, const fs::path& runDir) {
+  const auto& geom = cfg.geometry;
+  if (!cfg.source.fixedDistMm || cfg.source.fixedDistMm->empty() ||
+      !cfg.source.fixedXCmList || cfg.source.fixedXCmList->empty())
+    throw std::runtime_error(
+        "--drift-map needs source.source_distances_mm and source.x_positions_cm");
+  const std::vector<double>& depthsMm = *cfg.source.fixedDistMm;
+  const std::vector<double>& xsCm     = *cfg.source.fixedXCmList;
+  const double wireRcm = geom.wireDiamUm * 1.e-4 / 2.;
+  const double halfPitch = geom.wirePitchCm / 2.;
+
+  // Wire x-positions (y = 0): test whether a line reached a wire, and whether the START
+  // sits on the inter-wire symmetry plane (distance-to-nearest-wire ≈ the half-pitch).
+  std::vector<double> wiresX;
+  for (int i = 0; i < geom.nWires; ++i)
+    wiresX.push_back((i - (geom.nWires - 1) / 2.) * geom.wirePitchCm);
+  auto reachedWire = [&](double x, double y) {
+    double best = 1.e30;
+    for (double xw : wiresX) best = std::min(best, std::hypot(x - xw, y));
+    return best < 2. * wireRcm;
+  };
+  auto onMidPlane = [&](double x) {  // exact symmetry plane → RKF rides the saddle
+    double best = 1.e30;
+    for (double xw : wiresX) best = std::min(best, std::abs(x - xw));
+    return best > 0.95 * halfPitch;
+  };
+
+  DriftLineRKF drift(&sensor);
+  drift.EnableSignalCalculation(false);  // only need drift time + spread
+  drift.EnableAvalanche(false);          // pure drift to the wire (no multiplication)
+  drift.SetMaximumStepSize();            // cap step size near the wire feature size
+
+  const fs::path csvPath = runDir / "drift_map.csv";
+  std::ofstream csv(csvPath);
+  csv << "source_distance_mm,x_position_cm,mean_drift_ns,rms_drift_ns,reliable,end_y_cm\n";
+  csv << std::setprecision(10);
+
+  // Start point mirrors the avalanche loop: x0 = x (cm), y0 = -depth (readout side).
+  std::size_t nCells = 0, nFlagged = 0;
+  for (double dMm : depthsMm) {
+    const double sourceYCm = -dMm * 0.1;  // mm → cm, readout side (y < 0)
+    const double y0 = std::max(-geom.gapCm + 1.e-4,
+                               std::min(geom.gapCm - 1.e-4, sourceYCm));
+    for (double xCm : xsCm) {
+      const bool ok = drift.DriftElectron(xCm, y0, 0., 0.);
+      double xe = 0., ye = 0., ze = 0., te = 0.;
+      int st = -999;
+      if (ok) drift.GetEndPoint(xe, ye, ze, te, st);
+      // Unreliable when the line failed, did not reach a wire, OR started on the exact
+      // symmetry plane (the slow near-saddle path inflates the drift time ~2×, even
+      // though the line does eventually curl onto a wire).  Flag and write NaN.
+      const bool reliable = ok && reachedWire(xe, ye) && !onMidPlane(xCm);
+      const double mean = reliable ? drift.GetDriftTime()         : std::nan("");
+      const double rms  = reliable ? drift.GetArrivalTimeSpread() : std::nan("");
+      csv << dMm << "," << xCm << "," << mean << "," << rms << ","
+          << (reliable ? 1 : 0) << "," << ye << "\n";
+      ++nCells;
+      if (!reliable) ++nFlagged;
+    }
+  }
+  csv.close();
+  std::cout << "\nDrift-only map (DriftLineRKF): " << nCells << " cells, " << nFlagged
+            << " flagged reliable=0 (mid-plane saddle; mean/rms=NaN, fill from neighbours) → "
+            << csvPath << "\n";
+}
+
 int main(int argc, char* argv[]) {
   try {
     // Flush cout after every write so the GUI log panel streams in real time
@@ -1784,6 +1872,14 @@ int main(int argc, char* argv[]) {
     SetupSensor(sensor, cmp,
                 cfg.readout.type == "resistive" ? &cmpReadout : nullptr,
                 cfg);
+
+    // Drift-only map mode: write drift_map.csv (τ̄, σ_τ per grid point) and exit,
+    // skipping the avalanche loop and ROOT output entirely.
+    if (opts.driftMap) {
+      std::cout << "\nDrift-only map mode (--drift-map): no avalanche, no ROOT output.\n";
+      RunDriftMap(cfg, sensor, runDir);
+      return 0;
+    }
 
     // ROOT output
     TFile rootFile((runDir / "tgc_sim.root").string().c_str(), "RECREATE");
