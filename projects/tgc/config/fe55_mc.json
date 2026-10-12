@@ -53,5 +53,12 @@
     "tcut_ns": 100.0,
     "out_time_step_ns": 0.5,
     "seed": 1
+  },
+
+  "amplifier": {
+    "_comment": "Readout amplifier (CAEN N979B current amp). When enabled, the single-electron shape S is convolved with a one-pole RC low-pass at bandwidth_high_hz (tau=1/(2*pi*f); same model as tgc_sim, broadband with NO differentiation), folding the sub-ns induced-current spike down to the bandwidth-limited pulse the real chain measures. This lowers/broadens the pulse PEAK (amplitude) while conserving its integral (charge). N979B: ~250 MHz small-signal, dropping to ~130 MHz for large (55Fe) signals. output_sample_ns adds an optional digitizer boxcar (0 = off). OFF by default (bare-current baseline); --amp-bw-mhz / --no-amp override.",
+    "enable": false,
+    "bandwidth_high_hz": 250000000.0,
+    "output_sample_ns": 0.0
   }
 }

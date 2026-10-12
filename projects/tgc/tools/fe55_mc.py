@@ -64,6 +64,10 @@ DEFAULTS = {
     ],
     "run": {"n_photons": 20000, "n_photons_scan": 3000, "tcut_ns": 100.0,
             "out_time_step_ns": 0.5, "seed": 1},
+    # Readout amplifier (CAEN N979B): a one-pole low-pass at the upper band edge folds
+    # the sub-ns induced-current spike down to the bandwidth-limited pulse the real chain
+    # measures. OFF by default (the bare-current baseline); enable via config or --amp-bw-mhz.
+    "amplifier": {"enable": False, "bandwidth_high_hz": 250.0e6, "output_sample_ns": 0.0},
 }
 
 
@@ -76,9 +80,33 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
-def load_shape(shape_dir: Path, tcut: float):
+def _amp_response(dt: float, amp: dict) -> np.ndarray:
+    """Area-normalized readout impulse response sampled at dt [ns]: a one-pole RC
+    low-pass at the upper band edge (tau = 1/(2*pi*f_high); mirrors tgc_sim's
+    ApplyOnePoleLowPass -- broadband, no differentiation), optionally followed by a
+    boxcar of width output_sample_ns (digitizer aperture). Sum -> 1 (conserves charge).
+    Returns [1.0] (a no-op) when the bandwidth is unset."""
+    f_high = float(amp.get("bandwidth_high_hz", 0.0) or 0.0)
+    h = np.array([1.0])
+    if f_high > 0.0:
+        tau = 1e9 / (2.0 * np.pi * f_high)              # ns
+        b = np.exp(-dt / tau)
+        n = max(1, int(np.ceil(6.0 * tau / dt)))
+        h = (1.0 - b) * b ** np.arange(n + 1)           # one-pole FIR, sum -> 1
+    samp = float(amp.get("output_sample_ns", 0.0) or 0.0)
+    if samp > 0.0:
+        nb = max(1, int(round(samp / dt)))
+        h = np.convolve(h, np.ones(nb) / nb)
+    s = h.sum()
+    return h / s if s > 0 else h
+
+
+def load_shape(shape_dir: Path, tcut: float, amp=None):
     """Canonical single-electron shape S(t'): pool `mean_norm_current` over all
-    positions (position-independent), restrict to [-5, tcut], renormalize peak to 1."""
+    positions (position-independent), restrict to [-5, tcut], renormalize peak to 1.
+    If `amp` is enabled, fold in the readout response (one-pole low-pass at the amplifier
+    bandwidth) so S is the bandwidth-limited pulse -- peak lowered and broadened (NOT
+    re-peak-normalized; that lower peak is the physical effect); ipk tracks the shift."""
     df = pd.read_csv(shape_dir / "waveform_shapes.csv")
     g = (df.groupby("time_since_peak_ns")["mean_norm_current"]
            .mean().reset_index().sort_values("time_since_peak_ns"))
@@ -90,6 +118,12 @@ def load_shape(shape_dir: Path, tcut: float):
     if pk > 0:
         S = S / pk
     ipk = int(np.argmin(np.abs(ts)))        # index of t'=0 (the spike)
+    if amp and amp.get("enable"):
+        dt = float(np.median(np.diff(ts))) if len(ts) > 1 else 0.5
+        h = _amp_response(dt, amp)
+        if len(h) > 1:
+            S = np.convolve(S, h)[:len(S)]  # bandwidth-limited pulse (area conserved)
+            ipk = int(np.argmax(S))         # peak delayed/lowered by the low-pass
     return ts, S, ipk
 
 
@@ -762,7 +796,7 @@ def load_maps(shape_dir, gain_dir, cfg, tcut, drift_csv=None):
     """Load every position-scan input once into a bundle reused across studies.
     drift_csv overrides the drift map (default shape_dir/waveform_drift.csv)."""
     wires = _wire_positions_cm(cfg["geometry"])
-    ts, S, ipk = load_shape(Path(shape_dir), tcut)
+    ts, S, ipk = load_shape(Path(shape_dir), tcut, cfg.get("amplifier"))
     ys, ds, tau, rms = _grid_from_drift(Path(shape_dir), wires, drift_csv)
     cells, gmean, grms = load_gain_cells(Path(gain_dir), wires, ys, ds)
     dt = cfg["run"]["out_time_step_ns"]
@@ -856,10 +890,25 @@ def main() -> int:
     ap.add_argument("--collimator-center", choices=["wire", "gap", "both"], default="wire",
                     help="center the collimator on a wire (default), between wires, or both "
                          "(a 3-way comparison with the uniform spectrum)")
+    ap.add_argument("--amp-bw-mhz", type=float, default=None,
+                    help="enable the readout amplifier low-pass at this upper bandwidth [MHz] "
+                         "(CAEN N979B ~250 small-signal, ~130 large-signal)")
+    ap.add_argument("--no-amp", action="store_true",
+                    help="force the amplifier response off (bare induced current)")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
     cfg = _merge(DEFAULTS, json.loads(cfg_path.read_text()) if cfg_path.exists() else {})
+    cfg.setdefault("amplifier", dict(DEFAULTS["amplifier"]))
+    if args.no_amp:
+        cfg["amplifier"]["enable"] = False
+    elif args.amp_bw_mhz is not None:
+        cfg["amplifier"]["enable"] = True
+        cfg["amplifier"]["bandwidth_high_hz"] = args.amp_bw_mhz * 1e6
+    _amp = cfg["amplifier"]
+    if _amp.get("enable"):
+        print(f"  amplifier: one-pole low-pass at {_amp['bandwidth_high_hz']/1e6:.0f} MHz"
+              + (f" + {_amp['output_sample_ns']:.1f} ns boxcar" if _amp.get("output_sample_ns") else ""))
     run = cfg["run"]
     seed = args.seed if args.seed is not None else run["seed"]
     tcut = args.tcut if args.tcut is not None else run["tcut_ns"]
