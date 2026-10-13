@@ -126,6 +126,16 @@ production simulation, which instead fires one representative avalanche and scal
 $N=\mathrm{round}(E/W)$; here the $N$ primaries are independent, each with its own position, arrival time
 and gain --- which is what produces the realistic pulse shape and its event-to-event fluctuations.
 
+\paragraph{Readout bandwidth (optional).} The bare induced current $S$ carries no bandwidth limit,
+whereas a real fast \emph{current} amplifier does. The pulse may therefore be passed through the readout
+response, $W\to W*h$, with $h$ a one-pole RC low-pass at the amplifier's upper $-3$\,dB edge
+($\tau=1/2\pi f_\mathrm{high}$; no differentiation, modelling a broadband current amplifier such as the
+CAEN~N979B --- $f_\mathrm{high}\approx250$~MHz for small signals, falling to $\approx130$~MHz for the
+large \Fe{} pulses). By linearity $h$ is applied once to the kernel $S$; it conserves the pulse integral
+(the charge), lowering and broadening only the peak. It is \emph{off} by default --- the figures below
+use the bare current --- and is enabled with the \texttt{amplifier} config block or
+\texttt{-{}-amp-bw-mhz}. Its effect on the pulse height is quantified in Sec.~\ref{sec:amp}.
+
 \subsection{\Fe{} primary-charge generation}
 \label{sec:primary}
 The primary ionization is built microscopically, cluster by cluster, so that both the number of
@@ -306,14 +316,47 @@ process. The numbers are collected in Table~\ref{tab:summary}.
 \end{figure}
 
 \subsection{Pulse-height (peak-amplitude) spectra}
-A fast current readout measures the pulse height rather than the integrated charge. Because the peak
-amplitude depends on the pulse \emph{width} as well as the charge ($A\propto Q/\mathrm{width}$), and the
-width varies strongly across the cell, the pulse-height spectrum is far more position-smeared than the
-charge spectrum: $\sigma_E/E\approx34\%$ for the uniform exposure (Fig.~\ref{fig:amp}), versus $16\%$
-for charge. Under collimation the on-wire aperture is now the \emph{tighter} one (sharp pulses track the
-charge directly), the reverse of the charge case (Fig.~\ref{fig:ampcompare}). The practical conclusion
-is that, for this chamber, the integrated charge is a substantially better energy estimator than the
-peak pulse height.
+\label{sec:amp}
+A fast current readout measures the pulse height rather than the integrated charge. The height is the
+\emph{peak} of $W(t)$, and the bare single-electron current $S$ peaks in a sub-nanosecond
+\textbf{electron spike} (the avalanche electrons collected in $<1$~ns), riding on a slow, broad
+\textbf{ion tail} that carries most of the charge. The summed pulse height is therefore dominated by the
+spike \emph{pile-up} --- the gain-weighted charge arriving within one spike width, so
+$A\propto Q/(\text{arrival spread})$. Because the arrival spread varies strongly across the cell (short
+near a wire, long toward the mid-gap), the pulse-height spectrum is far more position-smeared than the
+charge spectrum: $\sigma_E/E\approx34\%$ for the uniform exposure (Fig.~\ref{fig:amp}), versus $16\%$ for
+charge. The ion-tail part of each pulse, by contrast, is charge-proportional and would give a tight,
+charge-like peak on its own.
+
+That $34\%$ is the MC's native high-bandwidth ($\approx$GHz) limit. A real fast current amplifier has a
+finite bandwidth that low-passes the sub-ns spike; folding in the readout response broadens and lowers
+the single-electron peak and tightens the pulse height toward the charge, while leaving the charge
+untouched (Table~\ref{tab:ampbw}). At the CAEN~N979B's large-signal $130$~MHz the single-electron
+peak-FWHM grows from $1.0$ to $2.5$~ns and $\sigma_E/E$ falls from $34\%$ to $29\%$.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Effect of the readout amplifier bandwidth on the uniform-exposure pulse-height resolution
+  (one-pole low-pass at $f_\mathrm{high}$, Eq.~\eqref{eq:sum}). The charge resolution is unchanged --- the
+  low-pass conserves the pulse integral; only the peak is affected.}
+  \label{tab:ampbw}
+  \begin{tabular}{lccc}
+    \toprule
+    $f_\mathrm{high}$ & single-$e$ peak-FWHM & amplitude $\sigma_E/E$ & charge $\sigma_E/E$ \\
+    \midrule
+    none ($\approx$GHz)      & $1.0$~ns & $34\%$ & $16\%$ \\
+    $250$~MHz (small-signal) & $1.5$~ns & $32\%$ & $16\%$ \\
+    $130$~MHz (large-signal) & $2.5$~ns & $29\%$ & $16\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Even at the N979B bandwidth the pulse height stays well above the charge resolution: the electron spike
+still contributes to the peak (the electron/ion balance of the single-electron response), so the height
+remains partly pile-up-driven. Under collimation the on-wire aperture is now the \emph{tighter} one
+(sharp pulses track the charge directly), the reverse of the charge case (Fig.~\ref{fig:ampcompare}).
+The practical conclusion is unchanged: for this chamber the integrated charge is a substantially better
+energy estimator than the peak pulse height.
 
 \begin{figure}[htbp]
   \centering
@@ -372,15 +415,18 @@ the following picture of the chamber's signal:
         exposure, improving to $\approx14\%$ when collimated between wires and degrading to $\approx17\%$
         on a wire; at a fixed position it is intrinsically a few percent, so the spread is dominated by
         gain non-uniformity across the cell;
-  \item the \textbf{peak pulse height} is a markedly poorer energy estimator ($\approx34\%$) than the
-        integrated charge, because it also folds in the position-dependent pulse width.
+  \item the \textbf{peak pulse height} is a markedly poorer energy estimator than the integrated charge:
+        $\approx34\%$ at the MC's native high bandwidth, because the height is the electron-spike
+        pile-up ($\propto Q/\text{arrival spread}$); folding in the readout amplifier bandwidth
+        (CAEN~N979B, $\approx130$~MHz) tightens it to $\approx29\%$, still well short of the charge.
 \end{itemize}
 
 \begin{table}[htbp]
   \centering
   \caption{Main-peak centroid and resolution of the \Fe{} photopeak for the three exposures, for the
   integrated charge and the peak amplitude. Charge in $10^3$ gain-electrons, amplitude in $10^6$
-  arbitrary current units.}
+  arbitrary current units. The peak-amplitude columns are the bare high-bandwidth limit; the readout
+  amplifier bandwidth (Table~\ref{tab:ampbw}) tightens them by ${\sim}5$ points.}
   \label{tab:summary}
   \begin{tabular}{lcccc}
     \toprule
@@ -408,6 +454,8 @@ python3 tools/fe55_mc.py --mode realistic --collimator 1.8 \
         --collimator-center both --seed 1
 # single-event inspection
 python3 tools/fe55_mc.py --inspect --seed 1
+# optional: fold in the readout amplifier bandwidth (CAEN N979B, ~130 MHz large-signal)
+python3 tools/fe55_mc.py --mode realistic --seed 1 --amp-bw-mhz 130
 \end{verbatim}
 }
 See Section~14 of the TGC simulation manual (\texttt{docs/manual.md}) for the model details and the full
